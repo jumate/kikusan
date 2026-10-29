@@ -1,3 +1,5 @@
+> **Fork notice:** this is a maintained fork of the archived [dadav/kikusan](https://github.com/dadav/kikusan). See [FORK_NOTES.md](FORK_NOTES.md) for what changed and why.
+
 <div align="center">
 
 # Kikusan
