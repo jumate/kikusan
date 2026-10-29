@@ -195,13 +195,6 @@ def _get_ydl_opts(
             "http": lambda n: min(2**n, 30),  # Cap at 30s
             "fragment": lambda n: min(2**n, 30),
         },
-        # Docker/minimal environments may cause yt-dlp to choose a narrower default
-        # YouTube client set. Pin a broader, cookie-free client mix for consistency.
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["android", "web", "web_safari"],
-            }
-        },
         "remote_components": ["ejs:github"],
     }
 

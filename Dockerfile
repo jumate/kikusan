@@ -5,6 +5,9 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends ffmpeg jq curl rsgain && \
     rm -rf /var/lib/apt/lists/*
 
+# Deno: JavaScript runtime that yt-dlp needs for YouTube
+COPY --from=denoland/deno:bin /deno /usr/local/bin/deno
+
 # Install uv for fast package management
 COPY --from=ghcr.io/astral-sh/uv:latest@sha256:10902f58a1606787602f303954cea099626a4adb02acbac4c69920fe9d278f82 /uv /usr/local/bin/uv
 
