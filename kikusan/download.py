@@ -489,7 +489,7 @@ def download_url(
 
     try:
         # Extract info first to check if it's a playlist
-        ydl_opts_info = {"quiet": True, "no_warnings": True}
+        ydl_opts_info = {"quiet": True, "no_warnings": True, "ignoreerrors": "list=" in url}
         info = extract_info_with_retry(
             ydl_opts=ydl_opts_info,
             url=url,
@@ -503,6 +503,9 @@ def download_url(
         if video_id and is_unavailable_error(str(e)):
             record_unavailable(get_config().data_dir, video_id, str(e))
         raise
+
+    if info is None:
+        raise RuntimeError(f"Could not extract info for {url}")
 
     # Check if this is a playlist
     if info.get("_type") == "playlist" or "entries" in info:
