@@ -21,6 +21,72 @@ logger = logging.getLogger(__name__)
 
 LRCLIB_BASE_URL = "https://lrclib.net/api"
 
+# --- Fork patch: resilient LRCLIB requests ---------------------------------
+LRCLIB_HEADERS = {
+    "User-Agent": "kikusan-fork/0.23.1 (https://github.com/jumate/kikusan)",
+}
+_LRCLIB_RETRIES = 3
+_LRCLIB_PAUSE_SECONDS = 60
+_service_errors = 0
+_service_down_until = 0.0
+
+
+def _lyrics_disabled() -> bool:
+    """True when KIKUSAN_LYRICS_ENABLED is set to a false-like value."""
+    import os as _os
+
+    value = _os.getenv("KIKUSAN_LYRICS_ENABLED", "true").strip().lower()
+    return value in ("0", "false", "no", "off")
+
+
+def _lrclib_get(url, params=None, timeout=10.0):
+    """GET to LRCLIB with User-Agent, retries and a short pause when it is down.
+
+    Returns the response for any status that is not a temporary error (so 404
+    still means "no lyrics"), or None when the service is temporarily
+    unavailable. Every None increments _service_errors so callers can avoid
+    caching a negative result that was caused by an outage.
+    """
+    import time as _time
+
+    global _service_errors, _service_down_until
+    if _lyrics_disabled():
+        _service_errors += 1
+        return None
+    if _time.time() < _service_down_until:
+        _service_errors += 1
+        return None
+
+    delay = 2.0
+    for attempt in range(1, _LRCLIB_RETRIES + 1):
+        try:
+            response = httpx.get(
+                url, params=params, headers=LRCLIB_HEADERS, timeout=timeout
+            )
+        except httpx.TransportError as e:
+            logger.warning(
+                "LRCLIB connection error (attempt %d/%d): %s",
+                attempt, _LRCLIB_RETRIES, e,
+            )
+        else:
+            if response.status_code != 429 and response.status_code < 500:
+                return response
+            logger.warning(
+                "LRCLIB temporary error %d (attempt %d/%d)",
+                response.status_code, attempt, _LRCLIB_RETRIES,
+            )
+            retry_after = response.headers.get("Retry-After", "")
+            if retry_after.isdigit():
+                delay = min(float(retry_after), 15.0)
+        if attempt < _LRCLIB_RETRIES:
+            _time.sleep(delay)
+            delay *= 2
+
+    _service_errors += 1
+    _service_down_until = _time.time() + _LRCLIB_PAUSE_SECONDS
+    return None
+# --- End of fork patch ------------------------------------------------------
+
 # Matches trailing (content) or [content] at end of string
 _TRAILING_PARENS_RE = re.compile(r"\s*(?:\([^)]+\)|\[[^\]]+\])\s*$")
 
@@ -175,6 +241,10 @@ def get_lyrics_for_video(
     Returns:
         LRC formatted lyrics string, or None if not found
     """
+    if _lyrics_disabled():
+        logger.debug("Lyrics disabled (KIKUSAN_LYRICS_ENABLED), skipping video_id %s", video_id)
+        return None
+
     # Import here to avoid circular dependency
     from kikusan.config import get_config
     from kikusan.metadata_cache import CachedLyrics, MetadataCache
@@ -194,7 +264,14 @@ def get_lyrics_for_video(
             return cached.lyrics
 
     # Cache miss — do the full lookup
+    errors_before = _service_errors
     lyrics = _lookup_lyrics_for_video(video_id, fallback_title, fallback_artist, fallback_duration)
+    if lyrics is None and _service_errors > errors_before:
+        logger.warning(
+            "Lyrics service unavailable; not caching a negative result for video_id %s",
+            video_id,
+        )
+        return None
 
     # Store result in cache (positive or negative)
     with MetadataCache(cache_dir) as cache:
@@ -304,7 +381,7 @@ def _get_lyrics_exact(track_name: str, artist_name: str, duration_seconds: int) 
         logger.debug("Skipping exact lyrics lookup (no duration): %s - %s", artist_name, track_name)
         return None
     try:
-        response = httpx.get(
+        response = _lrclib_get(
             f"{LRCLIB_BASE_URL}/get",
             params={
                 "track_name": track_name,
@@ -313,6 +390,8 @@ def _get_lyrics_exact(track_name: str, artist_name: str, duration_seconds: int) 
             },
             timeout=10.0,
         )
+        if response is None:
+            return None
 
         if response.status_code == 404:
             logger.debug("No exact lyrics match for: %s - %s (duration: %ds)", artist_name, track_name, duration_seconds)
@@ -357,11 +436,13 @@ def _search_lyrics(
         if album_name:
             params["album_name"] = album_name
 
-        response = httpx.get(
+        response = _lrclib_get(
             f"{LRCLIB_BASE_URL}/search",
             params=params,
             timeout=10.0,
         )
+        if response is None:
+            return None
 
         if response.status_code == 404:
             logger.debug("No search results for: %s - %s", artist_name, track_name)
