@@ -29,3 +29,7 @@ YouTube changes often, so yt-dlp needs regular updates:
     uv lock --upgrade-package yt-dlp
 
 Then rebuild the Docker image without cache.
+
+## Lyrics resilience (lyrics.py)
+
+LRCLIB sometimes answers 503/429. Previously any error was treated as "no lyrics" and cached for 7 days. Now requests send a User-Agent, retry with backoff, pause for 60 seconds if the service stays down, and temporary failures are not cached as negative results.
