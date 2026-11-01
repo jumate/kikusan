@@ -648,6 +648,7 @@ def _tag_lyrics(
     import time
 
     from kikusan.lyrics import _search_lyrics, _try_cleaned_lookup, get_lyrics, save_lyrics
+    from kikusan import lyrics as _lyrics_mod
     from kikusan.metadata_cache import CachedLyrics, MetadataCache
 
     lrc_path = file_path.with_suffix(".lrc")
@@ -677,6 +678,8 @@ def _tag_lyrics(
         )
         return
 
+    errors_before = getattr(_lyrics_mod, "_service_errors", 0)
+
     try:
         # Strategy 1: exact match via get_lyrics
         lyrics = get_lyrics(metadata.title, metadata.artist, metadata.duration_seconds)
@@ -702,6 +705,14 @@ def _tag_lyrics(
         if lyrics:
             save_lyrics(lyrics, file_path)
             stats.lyrics_added += 1
+        elif getattr(_lyrics_mod, "_service_errors", 0) > errors_before:
+            # LRCLIB no respondio: no es lo mismo que "sin letra". No se cachea.
+            logger.warning(
+                "LRCLIB unavailable; lyrics not checked (will retry next run): %s - %s",
+                metadata.artist, metadata.title,
+            )
+            stats.lyrics_failed += 1
+            return
         else:
             logger.info("No lyrics found for: %s - %s", metadata.artist, metadata.title)
             stats.lyrics_not_found += 1
