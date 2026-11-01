@@ -25,10 +25,14 @@ LRCLIB_BASE_URL = "https://lrclib.net/api"
 LRCLIB_HEADERS = {
     "User-Agent": "kikusan-fork/0.23.1 (https://github.com/jumate/kikusan)",
 }
-_LRCLIB_RETRIES = 3
-_LRCLIB_PAUSE_SECONDS = 60
+_LRCLIB_RETRIES = 3              # intentos por consulta
+_LRCLIB_PAUSE_SECONDS = 60       # espera tras el primer fallo; se duplica en cada fallo seguido
+_LRCLIB_MAX_PAUSE_SECONDS = 600  # tope de esa espera
+_LRCLIB_MAX_FAILURES = 5         # fallos seguidos antes de rendirse un rato
+_LRCLIB_GIVE_UP_SECONDS = 1800   # cuanto tiempo se rinde
 _service_errors = 0
 _service_down_until = 0.0
+_consecutive_failures = 0
 
 
 def _lyrics_disabled() -> bool:
@@ -40,22 +44,34 @@ def _lyrics_disabled() -> bool:
 
 
 def _lrclib_get(url, params=None, timeout=10.0):
-    """GET to LRCLIB with User-Agent, retries and a short pause when it is down.
+    """GET to LRCLIB with User-Agent, retries and waiting when it is down.
 
     Returns the response for any status that is not a temporary error (so 404
-    still means "no lyrics"), or None when the service is temporarily
-    unavailable. Every None increments _service_errors so callers can avoid
-    caching a negative result that was caused by an outage.
+    still means "no lyrics"), or None when the service is unavailable. Every
+    None increments _service_errors so callers can avoid caching a negative
+    result that was caused by an outage.
+
+    After a failure, the next call waits (60 s, 120 s, 240 s, ...) and tries
+    again. After _LRCLIB_MAX_FAILURES failures in a row it gives up for
+    _LRCLIB_GIVE_UP_SECONDS and returns None immediately.
     """
     import time as _time
 
-    global _service_errors, _service_down_until
+    global _service_errors, _service_down_until, _consecutive_failures
     if _lyrics_disabled():
         _service_errors += 1
         return None
-    if _time.time() < _service_down_until:
-        _service_errors += 1
-        return None
+
+    now = _time.time()
+    if _service_down_until > now:
+        if _consecutive_failures >= _LRCLIB_MAX_FAILURES:
+            _service_errors += 1
+            return None
+        wait = _service_down_until - now
+        logger.warning("LRCLIB paused after errors; waiting %.0f s before retrying", wait)
+        _time.sleep(wait)
+    elif _consecutive_failures >= _LRCLIB_MAX_FAILURES:
+        _consecutive_failures = 0
 
     delay = 2.0
     for attempt in range(1, _LRCLIB_RETRIES + 1):
@@ -70,6 +86,7 @@ def _lrclib_get(url, params=None, timeout=10.0):
             )
         else:
             if response.status_code != 429 and response.status_code < 500:
+                _consecutive_failures = 0
                 return response
             logger.warning(
                 "LRCLIB temporary error %d (attempt %d/%d)",
@@ -83,7 +100,20 @@ def _lrclib_get(url, params=None, timeout=10.0):
             delay *= 2
 
     _service_errors += 1
-    _service_down_until = _time.time() + _LRCLIB_PAUSE_SECONDS
+    _consecutive_failures += 1
+    if _consecutive_failures >= _LRCLIB_MAX_FAILURES:
+        pause = _LRCLIB_GIVE_UP_SECONDS
+        logger.warning(
+            "LRCLIB failed %d times in a row; not querying it for %d min. "
+            "Songs left unchecked are not cached; run again later.",
+            _consecutive_failures, pause // 60,
+        )
+    else:
+        pause = min(
+            _LRCLIB_PAUSE_SECONDS * 2 ** (_consecutive_failures - 1),
+            _LRCLIB_MAX_PAUSE_SECONDS,
+        )
+    _service_down_until = _time.time() + pause
     return None
 # --- End of fork patch ------------------------------------------------------
 
