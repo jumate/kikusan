@@ -166,7 +166,7 @@ class Config:
 
     def validate_organization_mode(self):
         """Validate organization mode value."""
-        if self.organization_mode not in ("flat", "album"):
+        if self.organization_mode not in ("flat", "album", "pure_album"):
             raise ValueError(
                 f"Invalid organization mode: {self.organization_mode}. Must be 'flat' or 'album'."
             )

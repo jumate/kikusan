@@ -13,6 +13,7 @@ The basic strategy is the original get_lyrics() behavior, preserved as fallback.
 import logging
 import re
 import time
+import os
 from pathlib import Path
 
 import httpx
@@ -22,9 +23,22 @@ logger = logging.getLogger(__name__)
 LRCLIB_BASE_URL = "https://lrclib.net/api"
 
 # --- Fork patch: resilient LRCLIB requests ---------------------------------
+# User-Agent propio: LRCLIB pide a los clientes que se identifiquen.
 LRCLIB_HEADERS = {
     "User-Agent": "kikusan-fork/0.23.1 (https://github.com/jumate/kikusan)",
 }
+# Cabeceras opcionales: solo se envian si defines las variables (nunca vacias).
+if os.getenv("LRCLIB_APP_ID"):
+    LRCLIB_HEADERS["Lrclib-App-Id"] = os.getenv("LRCLIB_APP_ID", "")
+if os.getenv("LRCLIB_API_KEY"):
+    LRCLIB_HEADERS["Lrclib-Api-Key"] = os.getenv("LRCLIB_API_KEY", "")
+
+# Pausa entre estrategias de busqueda de una misma cancion (segundos)
+try:
+    _STRATEGY_DELAY = float(os.getenv("LRCLIB_STRATEGY_DELAY", "0.3"))
+except ValueError:
+    _STRATEGY_DELAY = 0.3
+
 _LRCLIB_RETRIES = 3              # intentos por consulta
 _LRCLIB_PAUSE_SECONDS = 60       # espera tras el primer fallo; se duplica en cada fallo seguido
 _LRCLIB_MAX_PAUSE_SECONDS = 600  # tope de esa espera
@@ -116,6 +130,7 @@ def _lrclib_get(url, params=None, timeout=10.0):
     _service_down_until = _time.time() + pause
     return None
 # --- End of fork patch ------------------------------------------------------
+
 
 # Matches trailing (content) or [content] at end of string
 _TRAILING_PARENS_RE = re.compile(r"\s*(?:\([^)]+\)|\[[^\]]+\])\s*$")
@@ -212,10 +227,12 @@ def _try_cleaned_lookup(
         lyrics = _get_lyrics_exact(cleaned_title, cleaned_artist, duration_seconds)
         if lyrics:
             return lyrics
+        time.sleep(_STRATEGY_DELAY)   # <-- Pausa antes de la siguiente búsqueda            
 
         lyrics = _search_lyrics(cleaned_title, cleaned_artist, album, duration_seconds)
         if lyrics:
             return lyrics
+        time.sleep(_STRATEGY_DELAY)   # <-- Pausa antes de la siguiente búsqueda            
 
     # Try stripping artist prefix from title (e.g., "Artist x Artist2 - Song")
     stripped = _strip_artist_from_title(cleaned_title, cleaned_artist)
@@ -231,10 +248,12 @@ def _try_cleaned_lookup(
         lyrics = _get_lyrics_exact(stripped_title, stripped_artist, duration_seconds)
         if lyrics:
             return lyrics
+        time.sleep(_STRATEGY_DELAY)   # <-- Pausa antes de la siguiente búsqueda            
 
         lyrics = _search_lyrics(stripped_title, stripped_artist, album, duration_seconds)
         if lyrics:
             return lyrics
+        time.sleep(_STRATEGY_DELAY)   # <-- Pausa antes de la siguiente búsqueda            
 
     # Nothing worked
     if cleaned_title == title and cleaned_artist == artist and stripped is None:
@@ -341,6 +360,7 @@ def _lookup_lyrics_for_video(
         )
         if lyrics:
             return lyrics
+        time.sleep(_STRATEGY_DELAY)   # <-- Pausa            
 
         # Step 3: Try search with ytmusicapi metadata (includes album for better matching)
         lyrics = _search_lyrics(
@@ -348,6 +368,7 @@ def _lookup_lyrics_for_video(
         )
         if lyrics:
             return lyrics
+        time.sleep(_STRATEGY_DELAY)   # <-- Pausa
 
         # Step 4: Try with cleaned ytmusicapi metadata (strip parentheticals, secondary artists)
         lyrics = _try_cleaned_lookup(
@@ -434,6 +455,8 @@ def _get_lyrics_exact(track_name: str, artist_name: str, duration_seconds: int) 
 
     except httpx.HTTPError as e:
         logger.warning("Failed to fetch lyrics (exact): %s", e)
+        global _service_errors
+        _service_errors += 1
         return None
 
 
@@ -463,8 +486,11 @@ def _search_lyrics(
             "track_name": track_name,
             "artist_name": artist_name,
         }
-        if album_name:
-            params["album_name"] = album_name
+            
+        # Ignorar álbumes genéricos que no aportan información útil
+        albumes_ignorados = ["canciones", "varios artistas", "various artists", "unknown", "desconocido"]
+        if album_name and album_name.strip().lower() not in albumes_ignorados:
+            params["album_name"] = album_name            
 
         response = _lrclib_get(
             f"{LRCLIB_BASE_URL}/search",
@@ -523,6 +549,8 @@ def _search_lyrics(
 
     except httpx.HTTPError as e:
         logger.warning("Failed to search lyrics: %s", e)
+        global _service_errors
+        _service_errors += 1
         return None
 
 

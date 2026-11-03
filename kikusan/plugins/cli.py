@@ -26,6 +26,7 @@ class AudioFormat(str, Enum):
 class OrganizationMode(str, Enum):
     flat = "flat"
     album = "album"
+    pure_album = "pure_album"  # fork    
 
 
 plugins_app = typer.Typer(help="Run plugin-based sync operations.")

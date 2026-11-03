@@ -37,6 +37,7 @@ class AudioFormat(str, Enum):
 class OrganizationMode(str, Enum):
     flat = "flat"
     album = "album"
+    pure_album = "pure_album"  # fork    
 
 
 class CookieMode(str, Enum):
