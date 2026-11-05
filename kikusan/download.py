@@ -380,11 +380,11 @@ def _apply_pure_album_tags(
 
         # 1. Guardar el álbum original (usando 'originalalbum' para coincidir con tagging.py)
         if original_album and original_album != custom_album_name:
-            audio["originalalbum"] = [original_album]
+            audio["originalalbum"] = [original_album.title()] # <-- Aplicado Title Case
 
         # 2. Forzar el tag ALBUM si nos han pasado un nombre custom (el de la lista)
         if custom_album_name:
-            audio["ALBUM"] = [custom_album_name]
+            audio["ALBUM"] = [custom_album_name.title()] # <-- Aplicado Title Case
             
         # 3. Aplicar COMPILATION y ALBUMARTIST
         if is_compilation:
