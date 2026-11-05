@@ -66,6 +66,7 @@ class QueueManager:
         is_pure_album: bool = False,
         move_to_root: bool = False,
         album_artist: Optional[str] = None,
+        nested_folders: bool = True,
     ) -> str:
         """
         Add a download job to the queue.
@@ -97,6 +98,7 @@ class QueueManager:
             is_pure_album=is_pure_album,
             move_to_root=move_to_root,
             album_artist=album_artist,
+            nested_folders=nested_folders,
         )
         async with self._jobs_lock:
             self.jobs[job_id] = job
@@ -176,6 +178,7 @@ class QueueManager:
                     artists=job.artists,
                     apply_replaygain=config.replaygain,
                     album_artist=job.album_artist, # <-- PASAMOS EL ALBUM ARTIST
+                    nested_folders=job.nested_folders,
                 ),
             )
 
@@ -198,6 +201,11 @@ class QueueManager:
                         try:
                             source_folder.rmdir()
                             logger.info("Carpeta temporal eliminada: %s", source_folder)
+                           
+                            # Si es estructura anidada, intentar borrar la carpeta del artista
+                            if job.nested_folders and source_folder.parent != recent_dir:
+                                source_folder.parent.rmdir()
+                                logger.info("Carpeta temporal de artista eliminada: %s", source_folder.parent)
                         except OSError:
                             pass                            
 

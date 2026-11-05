@@ -39,6 +39,7 @@ class DownloadJob(BaseModel):
     is_pure_album: bool = False
     move_to_root: bool = False
     album_artist: Optional[str] = None
+    nested_folders: bool = True
 
     def model_post_init(self, __context) -> None:
         """Set created_at to now if not provided (sentinel default)."""

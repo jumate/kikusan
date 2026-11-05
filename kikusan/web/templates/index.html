@@ -1067,23 +1067,30 @@
         let html = `
             <div class="playlist-download-all" style="margin-bottom: 20px; padding: 15px; background: var(--bg-secondary); border-radius: 8px; text-align: center; border: 1px solid var(--border-color);">
                 <h3 style="margin-top: 0;">Descargar Playlist como Álbum</h3>
-                <label style="display: flex; align-items: center; justify-content: center; gap: 8px; margin-bottom: 15px; cursor: pointer;">
-                    <input type="checkbox" id="move-to-root-checkbox" style="width: 18px; height: 18px;" checked>
-                    <span style="font-size: 14px; color: var(--text-secondary);">Mover a la carpeta raíz (Music) en lugar de recent_download</span>
-                </label>
+                
+                <div style="display: flex; flex-direction: column; align-items: center; gap: 10px; margin-bottom: 15px;">
+                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                        <input type="checkbox" id="nested-folders-checkbox" style="width: 18px; height: 18px;" checked>
+                        <span style="font-size: 14px; color: var(--text-secondary);">Crear carpetas anidadas (Artista / Año - Álbum)</span>
+                    </label>
+                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                        <input type="checkbox" id="move-to-root-checkbox" style="width: 18px; height: 18px;" checked>
+                        <span style="font-size: 14px; color: var(--text-secondary);">Mover a la carpeta raíz (Music) en lugar de recent_download</span>
+                    </label>
+                </div>
+
                 <button id="download-whole-playlist-btn" class="download-btn" style="padding: 10px 20px; font-size: 16px; width: auto; background-color: #e91e63;">
                     Descargar Todo (${tracks.length} canciones)
                 </button>
             </div>
         `;
 
-        // Renderizamos las canciones individuales debajo del botón
         html += tracks.map((track) => `
             <div class="track">
                 <div class="track-main">
                     <img class="track-cover" src="${proxyImageUrl(track.thumbnail_url)}" alt="" loading="lazy">
                     <div class="track-info">
-                        <div class="track-title">${escapeHtml(track.title)}${isUgcVideoType(track.video_type) ? '<span class="ugc-badge">UGC</span>' : ""}</div>
+                        <div class="track-title">${escapeHtml(track.title)}${isUgcVideoType(track.video_type) ? '<span class="ugc-badge">UGC</span>' : ''}</div>
                         <div class="track-artist">${escapeHtml(track.artist)}${track.album ? " - " + escapeHtml(track.album) : ""}</div>
                     </div>
                 </div>
@@ -1097,6 +1104,8 @@
             const btn = e.target;
             const format = formatSelector.value;
             const moveToRoot = document.getElementById("move-to-root-checkbox").checked;
+            const nestedFolders = document.getElementById("nested-folders-checkbox").checked;
+            
             btn.disabled = true;
             btn.textContent = "Añadiendo a la cola...";
             
@@ -1108,6 +1117,7 @@
                         url: searchInput.value.trim(),
                         audio_format: format,
                         move_to_root: moveToRoot,
+                        nested_folders: nestedFolders,
                     }),
                 });
                 
@@ -1127,6 +1137,18 @@
                 }, 3000);
             }
         });
+        
+        // Lógica para recordar el estado de los checkboxes
+        const moveCheckbox = document.getElementById("move-to-root-checkbox");
+        const nestedCheckbox = document.getElementById("nested-folders-checkbox");
+        
+        const savedMovePref = localStorage.getItem("moveToRoot");
+        if (savedMovePref !== null) moveCheckbox.checked = savedMovePref === "true";
+        moveCheckbox.addEventListener("change", (e) => localStorage.setItem("moveToRoot", e.target.checked));
+
+        const savedNestedPref = localStorage.getItem("nestedFolders");
+        if (savedNestedPref !== null) nestedCheckbox.checked = savedNestedPref === "true";
+        nestedCheckbox.addEventListener("change", (e) => localStorage.setItem("nestedFolders", e.target.checked));
       }
 
       function renderResults(tracks) {
