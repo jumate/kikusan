@@ -30,7 +30,7 @@ class QueueManager:
         self.jobs: dict[str, DownloadJob] = {}
         self.worker_task: Optional[Task] = None
         self._running = False
-        self._jobs_lock = asyncio.Lock()  # Protect concurrent access to self.jobs
+        self._jobs_lock = asyncio.Lock()
         self._cancelled_job_ids: set[str] = set()
         self.max_history = max_history
 
@@ -65,6 +65,7 @@ class QueueManager:
         playlist_name: Optional[str] = None,
         is_pure_album: bool = False,
         move_to_root: bool = False,
+        album_artist: Optional[str] = None,
     ) -> str:
         """
         Add a download job to the queue.
@@ -78,6 +79,7 @@ class QueueManager:
             playlist_name: Resolved playlist name for this job (from Remote-User header)
             is_pure_album: Download as part of an album (groups in recent_download)
             move_to_root: If True, move files from recent_download to the root music folder
+            album_artist: The main artist for the whole album
 
         Returns:
             Job ID
@@ -94,6 +96,7 @@ class QueueManager:
             playlist_name=playlist_name,
             is_pure_album=is_pure_album,
             move_to_root=move_to_root,
+            album_artist=album_artist,
         )
         async with self._jobs_lock:
             self.jobs[job_id] = job
@@ -106,13 +109,11 @@ class QueueManager:
         logger.info("Worker started")
         while self._running:
             try:
-                # Get job from queue with timeout
                 try:
                     job = await asyncio.wait_for(self.queue.get(), timeout=1.0)
                 except asyncio.TimeoutError:
                     continue
 
-                # Skip jobs that were removed before the worker picked them up.
                 async with self._jobs_lock:
                     should_skip = (
                         job.id in self._cancelled_job_ids
@@ -126,7 +127,6 @@ class QueueManager:
                     logger.info("Skipping removed/cancelled job (id=%s)", job.id)
                     continue
 
-                # Process the job
                 await self._process_job(job)
 
             except asyncio.CancelledError:
@@ -153,16 +153,13 @@ class QueueManager:
         config = get_config()
 
         def progress_callback(progress_data: dict):
-            """Update job progress from yt-dlp hook."""
             job.progress = progress_data.get("percent", 0.0)
             job.speed = progress_data.get("speed", "")
             job.eta = progress_data.get("eta", "")
 
         try:
-            # Determinar el modo de organización
             target_mode = "pure_album" if job.is_pure_album else config.organization_mode
 
-            # Run download in thread pool to avoid blocking
             loop = asyncio.get_event_loop()
             audio_path = await loop.run_in_executor(
                 None,
@@ -178,45 +175,37 @@ class QueueManager:
                     cookie_file=config.cookie_file_path,
                     artists=job.artists,
                     apply_replaygain=config.replaygain,
+                    album_artist=job.album_artist, # <-- PASAMOS EL ALBUM ARTIST
                 ),
             )
 
-            # Si es pure_album y el usuario marcó mover a la raíz, lo movemos
             if audio_path and job.is_pure_album and job.move_to_root:
                 try:
                     recent_dir = Path(config.download_dir) / "recent_download"
-                    # Asegurarnos de que el archivo está dentro de recent_download
                     if recent_dir in audio_path.parents:
-                        # NUEVO: Guardamos la referencia a la carpeta origen antes de cambiar la ruta
                         source_folder = audio_path.parent                         
                         rel_path = audio_path.relative_to(recent_dir)
                         new_path = Path(config.download_dir) / rel_path
                         new_path.parent.mkdir(parents=True, exist_ok=True)
 
-                        # Movemos el audio
                         shutil.move(str(audio_path), str(new_path))
                         
-                        # Movemos el archivo .lrc si existe
                         old_lrc = audio_path.with_suffix('.lrc')
                         new_lrc = new_path.with_suffix('.lrc')
                         if old_lrc.exists():
                             shutil.move(str(old_lrc), str(new_lrc))
                         
-                        # NUEVO: Intentar borrar la carpeta de origen si se ha quedado vacía
                         try:
                             source_folder.rmdir()
                             logger.info("Carpeta temporal eliminada: %s", source_folder)
                         except OSError:
-                            # Si la carpeta no está vacía (ej. hay más canciones de este álbum en cola), ignoramos el error
                             pass                            
 
-                        # Actualizamos la ruta para que el resto del proceso (M3U y UI) use la nueva
                         audio_path = new_path
                         logger.info("Álbum movido a la raíz: %s", audio_path.parent)
                 except Exception as move_err:
                     logger.error("Error moviendo archivos de recent_download a la raíz: %s", move_err)
 
-            # Add to playlist if configured
             playlist_name = job.playlist_name or config.web_playlist_name
             if audio_path and playlist_name:
                 await loop.run_in_executor(
@@ -226,7 +215,6 @@ class QueueManager:
             async with self._jobs_lock:
                 current_job = self.jobs.get(job.id)
                 if current_job is None:
-                    logger.info("Job removed while finishing (id=%s)", job.id)
                     return
                 current_job.status = JobStatus.COMPLETED
                 current_job.file_path = str(audio_path) if audio_path else None
@@ -239,61 +227,33 @@ class QueueManager:
             async with self._jobs_lock:
                 current_job = self.jobs.get(job.id)
                 if current_job is None:
-                    logger.info("Job removed while failing (id=%s)", job.id)
                     return
                 current_job.status = JobStatus.FAILED
                 current_job.error = str(e)
                 current_job.completed_at = datetime.now()
 
-        # Cleanup old jobs to prevent memory leak
         await self.cleanup_old_jobs()
 
     async def get_job(self, job_id: str) -> Optional[DownloadJob]:
-        """
-        Get a job by ID.
-
-        Args:
-            job_id: The job ID
-
-        Returns:
-            The job or None if not found
-        """
         async with self._jobs_lock:
             return self.jobs.get(job_id)
 
     async def list_jobs(self) -> list[DownloadJob]:
-        """
-        List all jobs ordered by creation time (newest first).
-
-        Returns:
-            List of jobs
-        """
         async with self._jobs_lock:
             return sorted(self.jobs.values(), key=lambda j: j.created_at, reverse=True)
 
     async def remove_job(self, job_id: str) -> bool:
-        """
-        Remove a job from the queue or clear if completed/failed.
-
-        Args:
-            job_id: The job ID to remove
-
-        Returns:
-            True if removed, False if not found
-        """
         async with self._jobs_lock:
             job = self.jobs.get(job_id)
             if not job:
                 return False
 
-            # Can only remove queued jobs or clear completed/failed
             if job.status in (JobStatus.COMPLETED, JobStatus.FAILED):
                 del self.jobs[job_id]
                 self._cancelled_job_ids.discard(job_id)
                 logger.info("Cleared job: %s (id=%s)", job.status.value, job_id)
                 return True
             elif job.status == JobStatus.QUEUED:
-                # Remove job immediately and mark its id so worker skips stale queue entry.
                 del self.jobs[job_id]
                 self._cancelled_job_ids.add(job_id)
                 logger.info("Cancelled and removed queued job (id=%s)", job_id)
@@ -302,26 +262,17 @@ class QueueManager:
             return False
 
     async def cleanup_old_jobs(self):
-        """Remove old completed/failed jobs beyond max_history limit.
-
-        Keeps the most recent completed/failed jobs up to max_history.
-        Active (queued/downloading) jobs are never removed.
-        """
         async with self._jobs_lock:
-            # Separate completed/failed jobs from active jobs
             completed_failed = [
                 job for job in self.jobs.values()
                 if job.status in (JobStatus.COMPLETED, JobStatus.FAILED)
             ]
 
-            # If we're over the limit, remove oldest jobs
             if len(completed_failed) > self.max_history:
-                # Sort by completion time (oldest first)
                 completed_failed.sort(
                     key=lambda j: j.completed_at or j.created_at
                 )
 
-                # Remove oldest jobs beyond the limit
                 num_to_remove = len(completed_failed) - self.max_history
                 for job in completed_failed[:num_to_remove]:
                     del self.jobs[job.id]
@@ -339,12 +290,6 @@ class QueueManager:
                 )
 
     async def get_stats(self) -> dict:
-        """
-        Get queue statistics.
-
-        Returns:
-            Dict with queue stats
-        """
         async with self._jobs_lock:
             queued = sum(1 for j in self.jobs.values() if j.status == JobStatus.QUEUED)
             downloading = sum(1 for j in self.jobs.values() if j.status == JobStatus.DOWNLOADING)

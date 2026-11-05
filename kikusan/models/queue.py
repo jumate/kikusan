@@ -38,6 +38,7 @@ class DownloadJob(BaseModel):
     playlist_name: Optional[str] = None
     is_pure_album: bool = False
     move_to_root: bool = False
+    album_artist: Optional[str] = None
 
     def model_post_init(self, __context) -> None:
         """Set created_at to now if not provided (sentinel default)."""

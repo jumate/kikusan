@@ -900,9 +900,11 @@ async def add_playlist_to_queue(request: QueueAddPlaylistRequest, http_request: 
     if not queue_manager:
         raise HTTPException(status_code=500, detail="Queue manager not initialized")
 
+    # --- IMPORTS LOCALES NECESARIOS ---
     from kikusan.search import get_playlist_tracks, parse_youtube_url
     import logging
     logger = logging.getLogger(__name__)
+    # ----------------------------------
 
     url_info = parse_youtube_url(request.url)
     if not url_info or url_info['type'] != 'playlist':
@@ -912,6 +914,16 @@ async def add_playlist_to_queue(request: QueueAddPlaylistRequest, http_request: 
         tracks = get_playlist_tracks(url_info['id'], allow_ugc=True)
         if not tracks:
             raise HTTPException(status_code=404, detail="No tracks found in playlist")
+
+        # Calcular el artista del álbum para los tags de compilación
+        unique_artists = set()
+        for t in tracks:
+            # Extraemos el artista principal ignorando feat, &
+            primary = t.artist.split(" feat. ")[0].split(" ft. ")[0].split(" & ")[0].split(", ")[0].strip()
+            unique_artists.add(primary)
+        
+        # Si solo hay un artista, ese es el del álbum. Si hay varios, es "Varios Artistas"
+        album_artist = list(unique_artists)[0] if len(unique_artists) == 1 else "Varios Artistas"
 
         config = get_config()
         remote_user = _get_remote_user(http_request, config)
@@ -928,6 +940,7 @@ async def add_playlist_to_queue(request: QueueAddPlaylistRequest, http_request: 
                 playlist_name=playlist_name,
                 is_pure_album=True,
                 move_to_root=request.move_to_root,
+                album_artist=album_artist,  # <-- Pasamos el artista del álbum
             )
             job_ids.append(job_id)
 
@@ -940,6 +953,7 @@ async def add_playlist_to_queue(request: QueueAddPlaylistRequest, http_request: 
     except Exception as e:
         logger.error("Failed to queue playlist: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
+        
 
 
 @app.post("/api/queue/add-album")

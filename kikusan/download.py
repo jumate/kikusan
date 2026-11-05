@@ -44,11 +44,22 @@ def _get_primary_artist(artist: str) -> str:
             return artist.split(separator)[0].strip()
     return artist.strip()
 
-def _get_pure_album_dir(output_dir: Path, info: dict) -> Path:
+def _get_pure_album_dir(output_dir: Path, info: dict, album_artist: str = None) -> Path:
     album = info.get("album", "Unknown Album")
     year = info.get("release_year")
+    
+    # Usamos el album_artist que nos pasan, o el de los metadatos
+    artist = album_artist or info.get("album_artist") or info.get("artist") or info.get("uploader") or "Unknown Artist"
+    
+    artist = _sanitize_path_component(artist)
     album = _sanitize_path_component(album)
-    folder_name = f"{year} - {album}" if year else album
+    
+    # Formato: Artista - Álbum - Año
+    if year:
+        folder_name = f"{artist} - {album} - {year}"
+    else:
+        folder_name = f"{artist} - {album}"
+        
     folder_name = _sanitize_path_component(folder_name)
     return output_dir / "recent_download" / folder_name
 
@@ -58,12 +69,13 @@ def _get_output_path(
     filename_template: str,
     organization_mode: str,
     use_primary_artist: bool = False,
+    album_artist: str = None,
 ) -> str:
     if organization_mode == "flat":
         return str(output_dir / f"{filename_template}.%(ext)s")
 
     if organization_mode == "pure_album":
-        target_dir = _get_pure_album_dir(output_dir, info)
+        target_dir = _get_pure_album_dir(output_dir, info, album_artist)
         track_number = info.get("track_number")
         if track_number:
             filename = f"{track_number:02d} - %(title)s.%(ext)s"
@@ -106,9 +118,10 @@ def _get_ydl_opts(
     progress_callback: callable = None,
     use_primary_artist: bool = False,
     cookie_file: str | None = None,
+    album_artist: str = None,
 ) -> dict:
     output_path = _get_output_path(
-        output_dir, info, filename_template, organization_mode, use_primary_artist
+        output_dir, info, filename_template, organization_mode, use_primary_artist, album_artist
     )
 
     opts = {
@@ -119,9 +132,8 @@ def _get_ydl_opts(
         "postprocessors": [
             {"key": "FFmpegExtractAudio", "preferredcodec": audio_format, "preferredquality": "0"},
             {"key": "FFmpegMetadata", "add_metadata": True},
-            # ELIMINADO: {"key": "EmbedThumbnail"},  <-- Dejamos que nuestro código Python lo haga
         ],
-        "writethumbnail": True, # Esto guarda la imagen original para que podamos leerla
+        "writethumbnail": True,
         "quiet": True,
         "no_warnings": True,
         "retry_sleep_functions": {"http": lambda n: min(2**n, 30), "fragment": lambda n: min(2**n, 30)},
@@ -162,9 +174,9 @@ def _compute_filename(info: dict, filename_template: str) -> str:
         filename = ydl.prepare_filename(info)
     return yt_dlp.utils.sanitize_filename(filename)
 
-def _file_exists(output_dir: Path, info: dict, audio_format: str, filename_template: str, organization_mode: str, use_primary_artist: bool = False) -> Path | None:
+def _file_exists(output_dir: Path, info: dict, audio_format: str, filename_template: str, organization_mode: str, use_primary_artist: bool = False, album_artist: str = None) -> Path | None:
     if organization_mode in ("flat", "pure_album"):
-        target_dir = output_dir if organization_mode == "flat" else _get_pure_album_dir(output_dir, info)
+        target_dir = output_dir if organization_mode == "flat" else _get_pure_album_dir(output_dir, info, album_artist)
         expected_name = _compute_filename(info, filename_template)
 
         for ext in [audio_format, "opus", "mp3", "m4a", "flac"]:
@@ -213,7 +225,7 @@ def _cleanup_thumbnail(audio_path: Path):
             except OSError as e:
                 logger.warning("Failed to delete thumbnail %s: %s", thumb.name, e)
 
-def download(video_id: str, output_dir: Path, audio_format: str = "opus", filename_template: str = DEFAULT_FILENAME_TEMPLATE, fetch_lyrics: bool = True, progress_callback: callable = None, organization_mode: str = "flat", use_primary_artist: bool = False, cookie_file: str | None = None, artists: list[str] | None = None, apply_replaygain: bool = False) -> Path:
+def download(video_id: str, output_dir: Path, audio_format: str = "opus", filename_template: str = DEFAULT_FILENAME_TEMPLATE, fetch_lyrics: bool = True, progress_callback: callable = None, organization_mode: str = "flat", use_primary_artist: bool = False, cookie_file: str | None = None, artists: list[str] | None = None, apply_replaygain: bool = False, album_artist: str = None) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     config = get_config()
     cooldown_hours = config.unavailable_cooldown_hours
@@ -233,7 +245,7 @@ def download(video_id: str, output_dir: Path, audio_format: str = "opus", filena
     artist = info.get("artist") or info.get("uploader", "Unknown")
     duration = info.get("duration", 0)
 
-    existing = _file_exists(output_dir, info, audio_format, filename_template, organization_mode, use_primary_artist)
+    existing = _file_exists(output_dir, info, audio_format, filename_template, organization_mode, use_primary_artist, album_artist)
     if existing:
         logger.info("Skipping (exists): %s - %s", artist, title)
         return existing
@@ -241,13 +253,13 @@ def download(video_id: str, output_dir: Path, audio_format: str = "opus", filena
     logger.info("Downloading: %s - %s", artist, title)
 
     try:
-        ydl_opts = _get_ydl_opts(output_dir, audio_format, filename_template, organization_mode, info, progress_callback, use_primary_artist, cookie_file)
+        ydl_opts = _get_ydl_opts(output_dir, audio_format, filename_template, organization_mode, info, progress_callback, use_primary_artist, cookie_file, album_artist)
         extract_info_with_retry(ydl_opts=ydl_opts, url=url, download=True, cookie_file=cookie_file, config=config)
     except Exception as e:
         if is_unavailable_error(str(e)): record_unavailable(config.data_dir, video_id, str(e), title=title, artist=artist)
         raise
 
-    audio_path = _find_downloaded_file(output_dir, info, audio_format, filename_template, organization_mode, use_primary_artist)
+    audio_path = _find_downloaded_file(output_dir, info, audio_format, filename_template, organization_mode, use_primary_artist, album_artist)
 
     if audio_path:
         if artists: write_multi_artist_tags(audio_path, artists)
@@ -255,9 +267,9 @@ def download(video_id: str, output_dir: Path, audio_format: str = "opus", filena
         if organization_mode == "pure_album":
             is_comp = len(artists) > 1 if artists else False
             if not is_comp:
-                artist_str = str(audio.get("artist", [""])[0]).lower()
+                artist_str = str(artist).lower() # CORREGIDO
                 if any(sep in artist_str for sep in ["&", ",", " feat", " ft.", " featuring", " x ", ";", "/", " y "]): is_comp = True
-            _apply_pure_album_tags(audio_path, is_compilation=is_comp)
+            _apply_pure_album_tags(audio_path, is_compilation=is_comp, album_artist=album_artist)
 
         # APLICAMOS EL RECORTE DE PORTADA AQUÍ
         if info.get("thumbnail"):
@@ -318,7 +330,7 @@ def _download_single(url: str, info: dict, output_dir: Path, audio_format: str, 
     audio_path = _find_downloaded_file(output_dir, info, audio_format, filename_template, organization_mode, use_primary_artist)
     if audio_path:
         if organization_mode == "pure_album":
-            artist_str = str(artist).lower()
+            artist_str = str(artist).lower() # CORREGIDO
             is_comp = any(sep in artist_str for sep in ["&", ",", " feat", " ft.", " featuring", " x ", ";", "/", " y "])
             _apply_pure_album_tags(audio_path, is_compilation=is_comp)
 
@@ -336,18 +348,20 @@ def _download_single(url: str, info: dict, output_dir: Path, audio_format: str, 
     return audio_path
 
 
-def _download_playlist(info: dict, output_dir: Path, audio_format: str, filename_template: str, fetch_lyrics: bool, organization_mode: str, use_primary_artist: bool = False, cookie_file: str | None = None, apply_replaygain: bool = False) -> list[Path]:
+def _download_playlist(info: dict, output_dir: Path, audio_format: str, filename_template: str, fetch_lyrics: bool, organization_mode: str, use_primary_artist: bool = False, cookie_file: str | None = None, apply_replaygain: bool = False, album_artist: str = None) -> list[Path]:
     entries = info.get("entries", [])
     playlist_title = info.get("title", "Unknown Playlist")
 
     logger.info("Downloading playlist: %s (%d tracks)", playlist_title, len(entries))
 
-    is_compilation_album = False
-    if organization_mode == "pure_album":
+    # Calcular album_artist para modo pure_album
+    if organization_mode == "pure_album" and not album_artist:
         unique_artists = set()
         for entry in entries:
             if entry and entry.get("artist"): unique_artists.add(_get_primary_artist(entry.get("artist")))
-        is_compilation_album = len(unique_artists) > 1
+        album_artist = list(unique_artists)[0] if len(unique_artists) == 1 else "Varios Artistas"
+
+    is_compilation_album = (album_artist == "Varios Artistas")
 
     downloaded = []
     skipped = 0
@@ -365,7 +379,7 @@ def _download_playlist(info: dict, output_dir: Path, audio_format: str, filename
             skipped += 1
             continue
 
-        existing = _file_exists(output_dir, entry, audio_format, filename_template, organization_mode, use_primary_artist)
+        existing = _file_exists(output_dir, entry, audio_format, filename_template, organization_mode, use_primary_artist, album_artist)
         if existing:
             downloaded.append(existing)
             skipped += 1
@@ -374,14 +388,14 @@ def _download_playlist(info: dict, output_dir: Path, audio_format: str, filename
         logger.info("[%d/%d] Downloading: %s - %s", i, len(entries), artist, title)
         try:
             url = f"https://music.youtube.com/watch?v={video_id}"
-            ydl_opts = _get_ydl_opts(output_dir, audio_format, filename_template, organization_mode, entry, None, use_primary_artist, cookie_file)
+            ydl_opts = _get_ydl_opts(output_dir, audio_format, filename_template, organization_mode, entry, None, use_primary_artist, cookie_file, album_artist)
             extract_info_with_retry(ydl_opts=ydl_opts, url=url, download=True, cookie_file=cookie_file, config=config)
 
-            audio_path = _find_downloaded_file(output_dir, entry, audio_format, filename_template, organization_mode, use_primary_artist)
+            audio_path = _find_downloaded_file(output_dir, entry, audio_format, filename_template, organization_mode, use_primary_artist, album_artist)
             if audio_path:
                 downloaded.append(audio_path)
                 if organization_mode == "pure_album":
-                    _apply_pure_album_tags(audio_path, is_compilation=is_compilation_album, album_artist=_get_primary_artist(artist))
+                    _apply_pure_album_tags(audio_path, is_compilation=is_compilation_album, album_artist=album_artist)
 
                 # APLICAMOS EL RECORTE DE PORTADA
                 if entry.get("thumbnail"):
@@ -403,9 +417,9 @@ def _download_playlist(info: dict, output_dir: Path, audio_format: str, filename
     return downloaded
 
 
-def _find_downloaded_file(output_dir: Path, info: dict, audio_format: str, filename_template: str, organization_mode: str, use_primary_artist: bool = False) -> Path | None:
+def _find_downloaded_file(output_dir: Path, info: dict, audio_format: str, filename_template: str, organization_mode: str, use_primary_artist: bool = False, album_artist: str = None) -> Path | None:
     if organization_mode in ("flat", "pure_album"):
-        target_dir = output_dir if organization_mode == "flat" else _get_pure_album_dir(output_dir, info)
+        target_dir = output_dir if organization_mode == "flat" else _get_pure_album_dir(output_dir, info, album_artist)
         expected_name = _compute_filename(info, filename_template)
         for ext in [audio_format, "opus", "m4a", "webm"]:
             exact_path = target_dir / f"{expected_name}.{ext}"
