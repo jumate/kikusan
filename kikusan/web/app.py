@@ -897,6 +897,7 @@ async def add_to_queue(request: QueueAddRequest, http_request: Request):
 
 @app.post("/api/queue/add-playlist")
 async def add_playlist_to_queue(request: QueueAddPlaylistRequest, http_request: Request):
+    """Add all tracks from a playlist URL to the queue with pure_album mode."""
     if not queue_manager:
         raise HTTPException(status_code=500, detail="Queue manager not initialized")
 
@@ -908,19 +909,46 @@ async def add_playlist_to_queue(request: QueueAddPlaylistRequest, http_request: 
     if not url_info or url_info['type'] != 'playlist':
         raise HTTPException(status_code=400, detail="Invalid YouTube playlist URL")
 
+    config = get_config()
+
     try:
+        # 1. Obtener el título real de la playlist usando yt-dlp
+        ydl_opts_info = {"quiet": True, "no_warnings": True, "extract_flat": True}
+        playlist_info = extract_info_with_retry(
+            ydl_opts=ydl_opts_info, 
+            url=request.url, 
+            download=False, 
+            cookie_file=config.cookie_file_path, 
+            config=config
+        )
+        playlist_title = playlist_info.get("title", "Unknown Album")
+
+        # 2. Obtener las canciones
         tracks = get_playlist_tracks(url_info['id'], allow_ugc=True)
         if not tracks:
             raise HTTPException(status_code=404, detail="No tracks found in playlist")
 
+        # 3. Calcular el artista y el nombre del álbum final
         unique_artists = set()
+        unique_albums = set()
+        
         for t in tracks:
             primary = t.artist.split(" feat. ")[0].split(" ft. ")[0].split(" & ")[0].split(", ")[0].strip()
             unique_artists.add(primary)
+            if t.album:
+                unique_albums.add(t.album)
         
-        album_artist = list(unique_artists)[0] if len(unique_artists) == 1 else "Varios Artistas"
+        # Es compilación si hay varios artistas o si hay varios álbumes originales
+        is_compilation = len(unique_artists) > 1 or len(unique_albums) > 1
+        album_artist = "Varios Artistas" if is_compilation else list(unique_artists)[0]
+        
+        # Si todas las canciones tienen el mismo álbum original, usamos ese.
+        # Si no, usamos el nombre de la playlist de YouTube.
+        if len(unique_albums) == 1:
+            custom_album_name = list(unique_albums)[0]
+        else:
+            custom_album_name = playlist_title
 
-        config = get_config()
         remote_user = _get_remote_user(http_request, config)
         playlist_name = config.effective_playlist_name(remote_user)
 
@@ -936,11 +964,14 @@ async def add_playlist_to_queue(request: QueueAddPlaylistRequest, http_request: 
                 is_pure_album=True,
                 move_to_root=request.move_to_root,
                 album_artist=album_artist,
-                nested_folders=request.nested_folders, # <-- NUEVO
+                nested_folders=request.nested_folders,
+                custom_album_name=custom_album_name,
+                is_compilation=is_compilation,
+                original_album=track.album, # Pasamos el álbum original de la canción
             )
             job_ids.append(job_id)
 
-        logger.info("Queued %d tracks from playlist URL: %s", len(job_ids), request.url)
+        logger.info("Queued %d tracks from playlist URL as album '%s'", len(job_ids), custom_album_name)
         return {
             "job_ids": job_ids,
             "track_count": len(job_ids),
@@ -949,7 +980,6 @@ async def add_playlist_to_queue(request: QueueAddPlaylistRequest, http_request: 
     except Exception as e:
         logger.error("Failed to queue playlist: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.post("/api/queue/add-album")
 async def add_album_to_queue(request: QueueAddAlbumRequest, http_request: Request):
