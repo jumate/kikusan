@@ -839,7 +839,7 @@ class QueueAddRequest(BaseModel):
     artist: str
     artists: list[str] | None = None
     audio_format: str = "opus"
-
+    move_to_root: bool = False
 
 class QueueAddAlbumRequest(BaseModel):
     """Request to add an album to the queue."""
@@ -849,6 +849,11 @@ class QueueAddAlbumRequest(BaseModel):
     artist: str
     audio_format: str = "opus"
 
+class QueueAddPlaylistRequest(BaseModel):
+    """Request to add a whole playlist to the queue as an album."""
+    url: str
+    audio_format: str = "opus"
+    move_to_root: bool = False
 
 class QueueAddResponse(BaseModel):
     """Response after adding a job."""
@@ -882,9 +887,59 @@ async def add_to_queue(request: QueueAddRequest, http_request: Request):
         format=audio_format,
         artists=request.artists,
         playlist_name=playlist_name,
+        is_pure_album=False,
+        move_to_root=request.move_to_root,
     )
 
     return QueueAddResponse(job_id=job_id, status="queued")
+
+
+@app.post("/api/queue/add-playlist")
+async def add_playlist_to_queue(request: QueueAddPlaylistRequest, http_request: Request):
+    """Add all tracks from a playlist URL to the queue with pure_album mode."""
+    if not queue_manager:
+        raise HTTPException(status_code=500, detail="Queue manager not initialized")
+
+    from kikusan.search import get_playlist_tracks, parse_youtube_url
+    import logging
+    logger = logging.getLogger(__name__)
+
+    url_info = parse_youtube_url(request.url)
+    if not url_info or url_info['type'] != 'playlist':
+        raise HTTPException(status_code=400, detail="Invalid YouTube playlist URL")
+
+    try:
+        tracks = get_playlist_tracks(url_info['id'], allow_ugc=True)
+        if not tracks:
+            raise HTTPException(status_code=404, detail="No tracks found in playlist")
+
+        config = get_config()
+        remote_user = _get_remote_user(http_request, config)
+        playlist_name = config.effective_playlist_name(remote_user)
+
+        job_ids = []
+        for track in tracks:
+            job_id = await queue_manager.add_job(
+                video_id=track.video_id,
+                title=track.title,
+                artist=track.artist,
+                format=request.audio_format,
+                artists=track.artists,
+                playlist_name=playlist_name,
+                is_pure_album=True,
+                move_to_root=request.move_to_root,
+            )
+            job_ids.append(job_id)
+
+        logger.info("Queued %d tracks from playlist URL: %s", len(job_ids), request.url)
+        return {
+            "job_ids": job_ids,
+            "track_count": len(job_ids),
+            "message": f"Added {len(job_ids)} tracks to queue as Album"
+        }
+    except Exception as e:
+        logger.error("Failed to queue playlist: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/queue/add-album")
@@ -924,6 +979,8 @@ async def add_album_to_queue(request: QueueAddAlbumRequest, http_request: Reques
                 format=audio_format,
                 artists=track.artists,
                 playlist_name=playlist_name,
+                is_pure_album=False,
+                move_to_root=False,
             )
             job_ids.append(job_id)
 

@@ -2,9 +2,11 @@
 
 import asyncio
 import logging
+import shutil
 import uuid
 from asyncio import Queue, Task
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from kikusan.config import get_config
@@ -61,6 +63,8 @@ class QueueManager:
         format: str = "opus",
         artists: Optional[list[str]] = None,
         playlist_name: Optional[str] = None,
+        is_pure_album: bool = False,
+        move_to_root: bool = False,
     ) -> str:
         """
         Add a download job to the queue.
@@ -72,6 +76,8 @@ class QueueManager:
             format: Audio format (opus, mp3, flac)
             artists: List of individual artist names for multi-value tags
             playlist_name: Resolved playlist name for this job (from Remote-User header)
+            is_pure_album: Download as part of an album (groups in recent_download)
+            move_to_root: If True, move files from recent_download to the root music folder
 
         Returns:
             Job ID
@@ -86,6 +92,8 @@ class QueueManager:
             status=JobStatus.QUEUED,
             artists=artists,
             playlist_name=playlist_name,
+            is_pure_album=is_pure_album,
+            move_to_root=move_to_root,
         )
         async with self._jobs_lock:
             self.jobs[job_id] = job
@@ -151,6 +159,9 @@ class QueueManager:
             job.eta = progress_data.get("eta", "")
 
         try:
+            # Determinar el modo de organización
+            target_mode = "pure_album" if job.is_pure_album else config.organization_mode
+
             # Run download in thread pool to avoid blocking
             loop = asyncio.get_event_loop()
             audio_path = await loop.run_in_executor(
@@ -162,13 +173,48 @@ class QueueManager:
                     filename_template=config.filename_template,
                     fetch_lyrics=True,
                     progress_callback=progress_callback,
-                    organization_mode=config.organization_mode,
+                    organization_mode=target_mode,
                     use_primary_artist=config.use_primary_artist,
                     cookie_file=config.cookie_file_path,
                     artists=job.artists,
                     apply_replaygain=config.replaygain,
                 ),
             )
+
+            # Si es pure_album y el usuario marcó mover a la raíz, lo movemos
+            if audio_path and job.is_pure_album and job.move_to_root:
+                try:
+                    recent_dir = Path(config.download_dir) / "recent_download"
+                    # Asegurarnos de que el archivo está dentro de recent_download
+                    if recent_dir in audio_path.parents:
+                        # NUEVO: Guardamos la referencia a la carpeta origen antes de cambiar la ruta
+                        source_folder = audio_path.parent                         
+                        rel_path = audio_path.relative_to(recent_dir)
+                        new_path = Path(config.download_dir) / rel_path
+                        new_path.parent.mkdir(parents=True, exist_ok=True)
+
+                        # Movemos el audio
+                        shutil.move(str(audio_path), str(new_path))
+                        
+                        # Movemos el archivo .lrc si existe
+                        old_lrc = audio_path.with_suffix('.lrc')
+                        new_lrc = new_path.with_suffix('.lrc')
+                        if old_lrc.exists():
+                            shutil.move(str(old_lrc), str(new_lrc))
+                        
+                        # NUEVO: Intentar borrar la carpeta de origen si se ha quedado vacía
+                        try:
+                            source_folder.rmdir()
+                            logger.info("Carpeta temporal eliminada: %s", source_folder)
+                        except OSError:
+                            # Si la carpeta no está vacía (ej. hay más canciones de este álbum en cola), ignoramos el error
+                            pass                            
+
+                        # Actualizamos la ruta para que el resto del proceso (M3U y UI) use la nueva
+                        audio_path = new_path
+                        logger.info("Álbum movido a la raíz: %s", audio_path.parent)
+                except Exception as move_err:
+                    logger.error("Error moviendo archivos de recent_download a la raíz: %s", move_err)
 
             # Add to playlist if configured
             playlist_name = job.playlist_name or config.web_playlist_name

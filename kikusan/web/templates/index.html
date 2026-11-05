@@ -78,6 +78,7 @@
       <div class="search-tabs">
         <button class="tab-btn active" data-tab="songs">Songs</button>
         <button class="tab-btn" data-tab="albums">Albums</button>
+        <button class="tab-btn" data-tab="playlists">Playlists</button>
         <button class="tab-btn" data-tab="explore">Explore</button>
         <button
           class="tab-btn"
@@ -104,6 +105,7 @@
 
       <div id="songs-results" class="results active"></div>
       <div id="albums-results" class="albums-grid"></div>
+      <div id="playlists-results" class="results"></div>
       <div id="explore-results" class="explore-section"></div>
       <div id="downloads-results" class="downloads-section"></div>
     </div>
@@ -311,6 +313,7 @@
         // Clear results and update URL
         songsResults.innerHTML = "";
         albumsResults.innerHTML = "";
+        playlistsResults.innerHTML = "";
         showStatus("");
         updateUrlParams("", currentTab);
       }
@@ -326,6 +329,7 @@
       const tabButtons = document.querySelectorAll(".tab-btn");
       const songsResults = document.getElementById("songs-results");
       const albumsResults = document.getElementById("albums-results");
+      const playlistsResults = document.getElementById("playlists-results");
       let currentTab = "songs";
       let viewingAlbum = null; // Tracks current album view mode { id, title, query }
 
@@ -459,7 +463,11 @@
 
       async function performPlaylistSearch(query) {
         closePlaylistSearch();
-        songsResults.innerHTML = "";
+        if (currentTab === "playlists") {
+            playlistsResults.innerHTML = "";
+        } else {
+            songsResults.innerHTML = "";
+        }
         showStatus("Fetching playlist tracks...");
 
         return new Promise((resolve) => {
@@ -482,7 +490,12 @@
             }
 
             showStatus(`Found ${data.results.length} tracks.`);
-            renderResults(data.results);
+            
+            if (currentTab === "playlists") {
+              renderPlaylistAsAlbum(data.results);
+            } else {
+              renderResults(data.results);
+            }
             resolve();
           });
 
@@ -587,6 +600,7 @@
         if (
           tab === "songs" ||
           tab === "albums" ||
+          tab === "playlists" ||
           tab === "explore" ||
           tab === "downloads"
         ) {
@@ -610,6 +624,7 @@
 
         songsResults.classList.remove("active");
         albumsResults.classList.remove("active");
+        playlistsResults.classList.remove("active");
         exploreResults.classList.remove("active");
         downloadsResults.classList.remove("active");
 
@@ -623,6 +638,8 @@
           songsResults.classList.add("active");
         } else if (tab === "albums") {
           albumsResults.classList.add("active");
+        } else if (tab === "playlists") {
+          playlistsResults.classList.add("active");
         } else if (tab === "explore") {
           exploreResults.classList.add("active");
           if (!skipExploreLoad) {
@@ -765,6 +782,9 @@
         } else if (currentTab === "albums") {
           albumsResults.innerHTML = "";
           await performAlbumSearch(query);
+        } else if (currentTab === "playlists") {
+          playlistsResults.innerHTML = "";
+          await performPlaylistSearch(query);
         }
         // Explore tab doesn't use search
       }
@@ -869,7 +889,7 @@
         }
 
         // Restore tab state
-        if (tab === "songs" || tab === "albums" || tab === "downloads") {
+        if (tab === "songs" || tab === "albums" || tab === "playlists" || tab === "downloads") {
           setActiveTab(tab);
         }
 
@@ -880,6 +900,7 @@
           searchInput.value = "";
           songsResults.innerHTML = "";
           albumsResults.innerHTML = "";
+          playlistsResults.innerHTML = "";
           showStatus("");
         }
       });
@@ -1038,6 +1059,74 @@
             btn.textContent = "Download Album";
           }, 3000);
         }
+      }
+
+      function renderPlaylistAsAlbum(tracks) {
+        stopCurrentAudio();
+        
+        let html = `
+            <div class="playlist-download-all" style="margin-bottom: 20px; padding: 15px; background: var(--bg-secondary); border-radius: 8px; text-align: center; border: 1px solid var(--border-color);">
+                <h3 style="margin-top: 0;">Descargar Playlist como Álbum</h3>
+                <label style="display: flex; align-items: center; justify-content: center; gap: 8px; margin-bottom: 15px; cursor: pointer;">
+                    <input type="checkbox" id="move-to-root-checkbox" style="width: 18px; height: 18px;">
+                    <span style="font-size: 14px; color: var(--text-secondary);">Mover a la carpeta raíz (Music) en lugar de recent_download</span>
+                </label>
+                <button id="download-whole-playlist-btn" class="download-btn" style="padding: 10px 20px; font-size: 16px; width: auto; background-color: #e91e63;">
+                    Descargar Todo (${tracks.length} canciones)
+                </button>
+            </div>
+        `;
+
+        // Renderizamos las canciones individuales debajo del botón
+        html += tracks.map((track) => `
+            <div class="track">
+                <div class="track-main">
+                    <img class="track-cover" src="${proxyImageUrl(track.thumbnail_url)}" alt="" loading="lazy">
+                    <div class="track-info">
+                        <div class="track-title">${escapeHtml(track.title)}${isUgcVideoType(track.video_type) ? '<span class="ugc-badge">UGC</span>' : ""}</div>
+                        <div class="track-artist">${escapeHtml(track.artist)}${track.album ? " - " + escapeHtml(track.album) : ""}</div>
+                    </div>
+                </div>
+            </div>
+        `).join("");
+
+        playlistsResults.innerHTML = html;
+
+        // Listener para el botón de descarga total
+        document.getElementById("download-whole-playlist-btn")?.addEventListener("click", async (e) => {
+            const btn = e.target;
+            const format = formatSelector.value;
+            const moveToRoot = document.getElementById("move-to-root-checkbox").checked;
+            btn.disabled = true;
+            btn.textContent = "Añadiendo a la cola...";
+            
+            try {
+                const response = await fetch("/api/queue/add-playlist", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        url: searchInput.value.trim(),
+                        audio_format: format,
+                        move_to_root: moveToRoot,
+                    }),
+                });
+                
+                const data = await response.json();
+                if (response.ok) {
+                    btn.textContent = `Encoladas ${data.track_count} canciones`;
+                    showStatus(`Playlist añadida a la cola como Álbum`);
+                } else {
+                    throw new Error(data.detail || "Unknown error");
+                }
+            } catch (error) {
+                btn.textContent = "Error";
+                showStatus("Failed: " + error.message, true);
+                setTimeout(() => {
+                    btn.disabled = false;
+                    btn.textContent = `Descargar Todo (${tracks.length} canciones)`;
+                }, 3000);
+            }
+        });
       }
 
       function renderResults(tracks) {
@@ -1605,7 +1694,7 @@
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             return res.json();
           }),
-          fetch("/api/explore/charts?country=ZZ").then((res) => {
+          fetch("/api/explore/charts?country=ES").then((res) => {
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             return res.json();
           }),
@@ -1666,7 +1755,7 @@
         let html = '<div class="explore-home">';
 
         // Charts section -- always render the header with country selector
-        const chartsCountry = charts && charts.country ? charts.country : "ZZ";
+        const chartsCountry = charts && charts.country ? charts.country : "ES";
         const chartTracks = charts && charts.tracks ? charts.tracks : [];
 
         html += `
@@ -1676,6 +1765,7 @@
                         <div class="explore-section-actions">
                             <select id="charts-country-selector" class="country-selector">
                                 <option value="ZZ" ${chartsCountry === "ZZ" ? "selected" : ""}>Global</option>
+                                <option value="ES" ${chartsCountry === "ES" ? "selected" : ""}>España</option> 
                                 <option value="US" ${chartsCountry === "US" ? "selected" : ""}>United States</option>
                                 <option value="GB" ${chartsCountry === "GB" ? "selected" : ""}>United Kingdom</option>
                                 <option value="DE" ${chartsCountry === "DE" ? "selected" : ""}>Germany</option>
