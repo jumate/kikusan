@@ -477,6 +477,19 @@ def _tag_replaygain(file_path: Path, *, dry_run: bool, stats: TagStats) -> None:
     else: stats.replaygain_failed += 1
 
 
+def _song_pause() -> None:
+    """Pause after a song that queried LRCLIB (KIKUSAN_SONG_DELAY, 1 s by default)."""
+    import os
+    import time
+
+    try:
+        delay = float(os.getenv("KIKUSAN_SONG_DELAY", "1.0"))
+    except ValueError:
+        delay = 1.0
+    if delay > 0:
+        time.sleep(delay)
+
+
 def tag_directory(
     directory: Path,
     *,
@@ -531,6 +544,7 @@ def tag_directory(
 
         for file_path in folder_files:
             logger.info("Processing: %s", file_path.name)
+            lookups_before = stats.lyrics_added + stats.lyrics_not_found + stats.lyrics_failed
             try:
                 tag_file(
                     file_path,
@@ -551,8 +565,8 @@ def tag_directory(
                 logger.warning("Error processing %s: %s", file_path.name, e)
                 stats.errors += 1
 
-            # fork: añade una pausa de 1 segundo
-            import time
-            time.sleep(1.0)
+            # fork: pausa solo si en esta cancion se ha consultado LRCLIB
+            if stats.lyrics_added + stats.lyrics_not_found + stats.lyrics_failed > lookups_before:
+                _song_pause()
 
     return stats
