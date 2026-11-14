@@ -7,54 +7,54 @@ Se ha desarrollado un plugin personalizado (`kikusan/plugins/lastfm_similar.py`)
 
 * **Funcionamiento y Características**:
   1. Obtiene tus artistas más escuchados del último mes (semillas).
-  2. **Aleatoriedad**: Mezcla tus artistas top y los similares obtenidos para que el Flow sea diferente en cada ejecución (evitando que te recomiende siempre lo mismo).
+  2. **Aleatoriedad**: Mezcla tus artistas top y los similares obtenidos para que el Flow sea diferente en cada ejecución.
   3. **Filtro de historial**: Descarta los artistas recomendados si has escuchado algo de ellos en los **últimos 6 meses**.
   4. **Lista negra**: Permite excluir artistas específicos usando el parámetro `exclude_artists`.
-  5. **Deduplicación con Navidrome**: Antes de descargar, consulta la API de Subsonic de Navidrome para comprobar si ya tienes la canción. Si ya existe en tu biblioteca, se salta la descarga.
-  6. Busca las canciones más populares de los artistas finales en YouTube Music.
+  5. **Deduplicación**: Antes de descargar, consulta la API de Subsonic de Navidrome para comprobar si ya tienes la canción.
+  6. **Limpieza Automática (Purge)**: Si se activa `purge_rating: 1`, el plugin lee de la API nativa de Navidrome todas las canciones que hayas puntuado con 1 estrella. Utiliza una **lógica difusa** para comparar nombres de archivo y artistas (soportando diferencias de mayúsculas, caracteres Unicode/japoneses o listas de artistas incompletas) y borra esos archivos físicos del disco. Finalmente, lanza un escaneo automático en Navidrome.
 
 * **Ejemplo de configuración en `cron.yaml`**:
 plugins:
   mi-flow-lastfm:
     type: lastfm_similar
     sync: false
-    schedule: "0 8 * * 1" # Todos los lunes a las 8:00
+    schedule: "0 8 * * 1"
     config:
       api_key: "TU_API_KEY"
       username: "TU_USUARIO"
       similar_artists_limit: 5
       songs_per_artist: 10
       flow_name: "Flow Last.fm"
-      exclude_artists: "Nena Daconte, Melendi" # Opcional
+      exclude_artists: "Nena Daconte, Melendi" 
+      purge_rating: 1
+
+*(Nota: Si quieres ejecutar SOLO la limpieza sin descargar música nueva, configura `similar_artists_limit: 0` y `songs_per_artist: 0`).*
 
 ## 2. Modo "Flow" (Pure Album) para Plugins
-Se ha modificado la lógica de sincronización de plugins (`kikusan/plugins/sync.py`) para permitir que cualquier plugin agrupe sus descargas como un único álbum (compilación) si se le pasa el parámetro `flow_name`.
+Se ha modificado la lógica de sincronización de plugins (`kikusan/plugins/sync.py`) para permitir que cualquier plugin agrupe sus descargas como un único álbum (compilación).
 
 * **Comportamiento**:
   * Descarga todas las canciones en una carpeta común (ej. `Flow Last.fm`) dentro de la raíz de la biblioteca.
-  * Aplica los tags automáticamente: `Album` (nombre del Flow), `AlbumArtist` ("Varios Artistas"), `Compilation` ("1") y `Original Album` (el disco original de cada canción).
-  * Genera un archivo `.m3u` con el nombre del Flow que contiene todas las canciones.
-  * Limpia los archivos temporales (como `.webp`) y las carpetas vacías tras mover las descargas (incluyendo la carpeta raíz `recent_download` si se queda vacía).
+  * Aplica los tags automáticamente: `Album`, `AlbumArtist` ("Varios Artistas"), `Compilation` ("1") y `Original Album`.
+  * Genera un archivo `.m3u` con el nombre del Flow.
+  * Limpia los archivos temporales y las carpetas vacías tras mover las descargas.
 
 ## 3. Soporte Mejorado para Deezer (Playlists y Álbumes)
-Se ha extendido el soporte nativo de Deezer para aceptar tanto listas de reproducción como álbumes.
+Se ha extendido el soporte nativo de Deezer para aceptar tanto listas de reproducción como álbumes (`/album/`).
 
 * **Novedades**:
-  * El sistema detecta URLs de álbumes (`/album/`) y consulta la API de Deezer para extraer el nombre real del disco.
-  * **Descarga de portadas**: Se descarga la carátula en alta resolución desde Deezer y se guarda automáticamente como `folder.jpg` en la carpeta del álbum para que Navidrome y Primuse la muestren.
-  * La interfaz web (`index.html`) ahora permite pegar URLs de álbumes de Deezer en la pestaña de "Playlists".
+  * Descarga la carátula en alta resolución desde Deezer y la guarda como `folder.jpg` en la carpeta del álbum para Navidrome y Primuse.
+  * La interfaz web (`index.html`) permite pegar URLs de álbumes de Deezer en la pestaña de "Playlists".
 
 ## 4. Procesamiento de Imágenes y Metadatos (Title Case)
-* **Carátulas Cuadradas**: Se utiliza la librería `Pillow` para recortar las carátulas descargadas de YouTube (que suelen ser apaisadas) a un cuadrado perfecto de 500x500 píxeles antes de incrustarlas.
-* **Formato Title Case**: Los nombres de los artistas, álbumes y carpetas se formatean automáticamente a "Title Case" (ej. `BURNING` pasa a `Burning`), manteniendo la coherencia visual.
+* **Carátulas Cuadradas**: Se utiliza `Pillow` para recortar las carátulas de YouTube a un cuadrado perfecto de 500x500 píxeles antes de incrustarlas.
+* **Formato Title Case**: Los nombres de artistas, álbumes y carpetas se formatean a "Title Case" para mantener la coherencia visual.
 
 ## 5. Resiliencia y Descargas con Doble Autenticación
-* **LRCLIB (Letras)**: Se ha implementado `tenacity` y `retryhttp` para manejar los errores `503 Service Unavailable`. El sistema respeta el encabezado `Retry-After` y reintenta con espera exponencial. Además, se ha registrado una App-ID para evitar bloqueos por límite de peticiones.
-* **Doble Autenticación en YouTube**:
-  * `YTMUSIC_COOKIE_FILE` (`browser.json`): Usa las credenciales de la **cuenta principal** para leer listas y Mixes privados, evitando bloqueos de IP al no usarla para descargar.
-  * `YT_DLP_COOKIE_FILE` (`cookies.txt`): Usa las credenciales de una **cuenta secundaria** para realizar las descargas masivas, protegiendo la cuenta principal.
+* **LRCLIB (Letras)**: Implementación de `tenacity` y `retryhttp` para manejar errores `503`. Registro de App-ID para evitar límites de peticiones.
+* **Doble Autenticación en YouTube**: Uso de `browser.json` (cuenta principal) para leer listas privadas y `cookies.txt` (cuenta secundaria) para realizar las descargas masivas de forma segura.
 
 ## 6. Integración con Navidrome
-* **Evitar fragmentación**: Gracias al etiquetado `Compilation=1` y `AlbumArtist=Varios Artistas`, Navidrome agrupa todas las canciones de una lista bajo un solo álbum, evitando que cree una carpeta por cada artista.
-* **Ignorar carpetas temporales**: Se puede excluir la carpeta `recent_download` de los escaneos de Navidrome añadiendo un archivo oculto `.ndignore`.
-* **Protección de archivos**: Kikusan consulta a Navidrome antes de borrar archivos locales si se usa el modo `sync: true`, protegiendo las canciones que tengas marcadas con favoritos (estrellas).
+* **Evitar fragmentación**: El etiquetado `Compilation=1` y `AlbumArtist=Varios Artistas` evita que Navidrome fragmente las listas en cientos de carpetas.
+* **Ignorar carpetas temporales**: Uso de `.ndignore` en `recent_download`.
+* **Protección de archivos**: Kikusan consulta a Navidrome para proteger canciones favoritas antes de borrarlas en los modos `sync`.

@@ -2,7 +2,7 @@
 
 import logging
 import shutil
-import os  # <-- AÑADIDO para la limpieza
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -28,75 +28,52 @@ def sync_plugin_instance(
     config: PluginConfig,
     sync_mode: bool,
 ) -> SyncResult:
-    """Sync a plugin instance.
-
-    Args:
-        plugin: Plugin instance
-        config: Plugin configuration
-        sync_mode: If True, delete removed tracks
-
-    Returns:
-        SyncResult with operation counts
-    """
+    """Sync a plugin instance."""
     from kikusan.config import get_config as get_app_config
     app_config = get_app_config()
 
     logger.info("Starting plugin sync: %s (%s)", config.name, plugin.name)
-
     state_dir = get_state_dir(app_config.data_dir)
 
-    # NUEVO: Comprobar si el plugin se comporta como un "Flow" (Pure Album)
     flow_name = config.config.get("flow_name")
     playlist_name = flow_name if flow_name else config.name
+    purge_rating = config.config.get("purge_rating")
 
     try:
-        # Fetch songs from plugin
         current_songs = plugin.fetch_songs(config.config)
         logger.info("Plugin returned %d songs", len(current_songs))
 
-        if not current_songs:
-            logger.warning("No songs returned by plugin")
-            return SyncResult(
-                plugin_name=config.name,
-                downloaded=0,
-                skipped=0,
-                failed=0,
-                errors=[],
-            )
+        # NUEVO: Si no hay canciones pero hay purge_rating, no abortamos, dejamos que pase al borrado.
+        if not current_songs and not purge_rating:
+            logger.warning("No songs returned by plugin and no purge_rating configured. Exiting.")
+            return SyncResult(plugin_name=config.name, downloaded=0, skipped=0, failed=0, errors=[])
 
-        # Load existing state
         state = load_plugin_state(state_dir, config.name)
         if not state:
-            state = PluginState(
-                plugin_name=config.name,
-                plugin_type=plugin.name,
-                source_url=config.config.get("url"),
-                last_check=datetime.now().isoformat(),
-                tracks=[],
-            )
+            state = PluginState(plugin_name=config.name, plugin_type=plugin.name, source_url=config.config.get("url"), last_check=datetime.now().isoformat(), tracks=[])
 
-        # Compare songs
         new_songs, removed_tracks = _compare_songs(current_songs, state)
         logger.info("Changes: %d new, %d removed", len(new_songs), len(removed_tracks))
 
-        # Download new songs
-        download_result = _download_songs(
-            new_songs,
-            config,
-            state,
-            plugin=plugin,  # <-- Pasamos el plugin para la comprobación en Navidrome
-            flow_name=flow_name,
-        )
+        download_result = {"downloaded": 0, "skipped": 0, "failed": 0, "errors": []}
+        if new_songs:
+            download_result = _download_songs(new_songs, config, state, plugin=plugin, flow_name=flow_name)
 
-        # Remove old tracks if sync=true
         deleted_count = 0
         if sync_mode and removed_tracks:
             deleted_count = _remove_tracks(removed_tracks, state, config.download_dir, app_config.data_dir)
 
-        # Update M3U playlist
+        # NUEVO: Purgar canciones con 1 estrella en Navidrome y lanzar escaneo si se borra algo
+        purged_count = 0
+        if flow_name and purge_rating and hasattr(plugin, "get_disliked_songs"):
+            purged_count = _purge_disliked_tracks(plugin, state, int(purge_rating), config)
+            
+            if purged_count > 0 and hasattr(plugin, "trigger_navidrome_scan"):
+                plugin.trigger_navidrome_scan()
+
+        # Actualizar M3U (después de purgar, para que no se incluyan las borradas)
         _update_m3u(playlist_name, state, config.download_dir)
 
-        # Update and save state
         state.last_check = datetime.now().isoformat()
         if "url" in config.config:
             state.source_url = config.config["url"]
@@ -110,63 +87,101 @@ def sync_plugin_instance(
             errors=download_result["errors"],
         )
 
-        logger.info(
-            "Plugin sync completed: %d downloaded, %d skipped, %d deleted, %d failed",
-            result.downloaded,
-            result.skipped,
-            deleted_count,
-            result.failed,
-        )
-
+        logger.info("Plugin sync completed: %d downloaded, %d skipped, %d deleted, %d failed", result.downloaded, result.skipped, deleted_count + purged_count, result.failed)
         return result
 
     except Exception as e:
         logger.error("Plugin sync failed: %s", e)
-        return SyncResult(
-            plugin_name=config.name,
-            downloaded=0,
-            skipped=0,
-            failed=1,
-            errors=[str(e)],
-        )
+        return SyncResult(plugin_name=config.name, downloaded=0, skipped=0, failed=1, errors=[str(e)])
     finally:
-        # NUEVO: Limpieza final de la carpeta recent_download si se ha quedado vacía
         _cleanup_recent_download(config.download_dir)
 
 
+def _purge_disliked_tracks(plugin: Plugin, state: PluginState, rating_threshold: int, config: PluginConfig) -> int:
+    """Busca en el estado las canciones y borra los archivos físicos que tengan la calificación indicada en Navidrome."""
+    logger.info("Obteniendo la lista de canciones marcadas con %d estrellas desde Navidrome...", rating_threshold)
+    
+    disliked_songs = plugin.get_disliked_songs(rating_threshold)
+    
+    if not disliked_songs:
+        logger.info("No se han encontrado canciones con %d estrellas en Navidrome.", rating_threshold)
+        return 0
+
+    logger.info("Navidrome ha reportado %d canciones con %d estrellas. Comprobando si alguna está en el Flow...", len(disliked_songs), rating_threshold)
+    deleted_count = 0
+    
+    for track in state.tracks:
+        file_path = Path(track.file_path)
+        
+        if not file_path.exists():
+            continue
+            
+        # Usamos el nombre del archivo sin la extensión como principal fuente de verdad
+        file_name = file_path.stem.lower().strip()
+        t_title = track.title.lower().strip()
+        t_artist = track.artist.lower().strip()
+        
+        match = False
+        for d_title, d_artist in disliked_songs:
+            # Comprobación 1: El nombre del archivo coincide con el título de Navidrome
+            file_match = (d_title in file_name) or (file_name in d_title)
+            
+            # Comprobación 2: Los tags coinciden
+            title_match = (t_title == d_title) or (t_title in d_title) or (d_title in t_title)
+            
+            # Comprobación laxa de artista: si Kikusan no supo el artista (Unknown, Varios), lo ignoramos
+            # o comprobamos si una parte del nombre del artista está en el otro.
+            artist_match = (t_artist in d_artist) or (d_artist in t_artist) or (t_artist in ["unknown", "unknown artist", "varios artistas", ""])
+            
+            if (file_match or title_match) and artist_match:
+                match = True
+                logger.info("  [MATCH] Kikusan: '%s' (Artista: %s) <==> Navidrome: '%s' (Artista: %s)", file_path.name, t_artist, d_title, d_artist)
+                break
+        
+        if match:
+            logger.info("Borrando archivo (1 estrella): %s", file_path.name)
+            try:
+                file_path.unlink()
+                lrc_path = file_path.with_suffix(".lrc")
+                if lrc_path.exists():
+                    lrc_path.unlink()
+                deleted_count += 1
+            except OSError as e:
+                logger.error("No se pudo borrar el archivo %s: %s", file_path, e)
+
+    if deleted_count > 0:
+        logger.info("Se han borrado físicamente %d archivos marcados con %d estrellas.", deleted_count, rating_threshold)
+    else:
+        logger.info("Ninguna de las canciones del Flow está marcada con %d estrellas en Navidrome o ya no existen en el disco.", rating_threshold)
+        
+    return deleted_count
+    
+    
 def _cleanup_recent_download(download_dir: Path):
     """Intenta borrar la carpeta recent_download si está vacía."""
     recent_dir = download_dir / "recent_download"
     if recent_dir.exists():
         try:
-            # Recorremos de abajo hacia arriba para borrar carpetas vacías
             for root, dirs, files in os.walk(recent_dir, topdown=False):
                 for name in dirs:
                     try:
                         os.rmdir(os.path.join(root, name))
                     except OSError:
                         pass
-            # Finalmente intentamos borrar la raíz recent_download
             recent_dir.rmdir()
             logger.info("Carpeta 'recent_download' eliminada por estar vacía.")
         except OSError:
             pass
 
 
-def _compare_songs(
-    current: list[Song],
-    state: PluginState,
-) -> tuple[list[Song], list[PluginTrackState]]:
+def _compare_songs(current: list[Song], state: PluginState) -> tuple[list[Song], list[PluginTrackState]]:
     """Compare current songs with state."""
     current_keys = {song.cache_key for song in current}
     state_keys = {track.cache_key for track in state.tracks}
-
     new_keys = current_keys - state_keys
     removed_keys = state_keys - current_keys
-
     new_songs = [s for s in current if s.cache_key in new_keys]
     removed_tracks = [t for t in state.tracks if t.cache_key in removed_keys]
-
     return new_songs, removed_tracks
 
 
@@ -174,13 +189,11 @@ def _download_songs(
     songs: list[Song],
     config: PluginConfig,
     state: PluginState,
-    plugin: Plugin,  # <-- AÑADIDO
+    plugin: Plugin,
     flow_name: str | None = None,
 ) -> dict:
     """Download songs and update state."""
-    downloaded = 0
-    skipped = 0
-    failed = 0
+    downloaded, skipped, failed = 0, 0, 0
     errors = []
 
     from kikusan.config import get_config
@@ -190,20 +203,17 @@ def _download_songs(
     for i, song in enumerate(songs, 1):
         logger.info("[%d/%d] Searching: %s - %s", i, len(songs), song.artist, song.title)
 
-        # Check if already in state (by cache_key)
         if any(t.cache_key == song.cache_key for t in state.tracks):
             logger.info("  Already downloaded, skipping")
             skipped += 1
             continue           
 
-        # 1. Comprobar si ya existe en Navidrome (usando el objeto plugin)
         if hasattr(plugin, "_is_already_in_navidrome") and plugin._is_already_in_navidrome(song.artist, song.title):
             skipped += 1
             continue
 
         video_id = None
         try:
-            # Search YouTube Music
             query = f"{song.artist} - {song.title}"
             results = search(query, limit=1)
 
@@ -216,22 +226,16 @@ def _download_songs(
             yt_track = results[0]
             video_id = yt_track.video_id
 
-            # Check if found video is on unavailable cooldown
             if is_on_cooldown(app_config.data_dir, video_id, cooldown_hours):
-                logger.info(
-                    "  Skipping (unavailable cooldown): %s - %s",
-                    yt_track.artist, yt_track.title,
-                )
+                logger.info("  Skipping (unavailable cooldown): %s - %s", yt_track.artist, yt_track.title)
                 skipped += 1
                 continue
 
             logger.info("  Found: %s - %s", yt_track.artist, yt_track.title)
 
-            # NUEVO: Obtener el nombre real del álbum desde los metadatos de YT Music
             meta = get_song_metadata(video_id)
             original_album = meta.album if meta else yt_track.album
 
-            # NUEVO: Configurar modo pure_album si es un flow
             org_mode = config.organization_mode
             album_artist = None
             custom_album_name = None
@@ -243,7 +247,6 @@ def _download_songs(
                 custom_album_name = flow_name
                 is_compilation = True
 
-            # Download
             audio_path = download(
                 video_id=video_id,
                 output_dir=config.download_dir,
@@ -253,7 +256,6 @@ def _download_songs(
                 organization_mode=org_mode,
                 use_primary_artist=config.use_primary_artist,
                 apply_replaygain=app_config.replaygain,
-                # NUEVOS PARÁMETROS PARA EL FLOW
                 album_artist=album_artist,
                 nested_folders=True,
                 custom_album_name=custom_album_name,
@@ -262,33 +264,28 @@ def _download_songs(
             )
 
             if audio_path:
-                # NUEVO: Si es un Flow, mover el archivo fuera de recent_download a la raíz
                 if flow_name:
                     try:
                         target_dir = Path(config.download_dir) / flow_name
                         target_dir.mkdir(parents=True, exist_ok=True)
                         new_path = target_dir / audio_path.name
                         
-                        # Mover el audio
                         shutil.move(str(audio_path), str(new_path))
                         
-                        # Mover la letra si existe
                         old_lrc = audio_path.with_suffix(".lrc")
                         if old_lrc.exists():
                             shutil.move(str(old_lrc), str(new_path.with_suffix(".lrc")))
                         
-                        # Borrar carpetas vacías que dejó el pure_album
                         try:
                             audio_path.parent.rmdir()
-                            audio_path.parent.parent.rmdir() # Borra la carpeta del artista
+                            audio_path.parent.parent.rmdir()
                         except OSError:
                             pass
 
-                        audio_path = new_path # Actualizamos la ruta para la base de datos
+                        audio_path = new_path
                     except Exception as e:
                         logger.warning("  No se pudo mover el archivo a la raíz: %s", e)
 
-                # Add to state
                 track_state = PluginTrackState(
                     cache_key=song.cache_key,
                     artist=song.artist,
@@ -304,100 +301,49 @@ def _download_songs(
             logger.error("  Failed: %s", e)
             failed += 1
             errors.append(f"{song.artist} - {song.title}: {e}")
-            # Record unavailable videos for cooldown
             if video_id and is_unavailable_error(str(e)):
-                record_unavailable(
-                    app_config.data_dir, video_id, str(e),
-                    title=song.title, artist=song.artist,
-                )
+                record_unavailable(app_config.data_dir, video_id, str(e), title=song.title, artist=song.artist)
 
-    return {
-        "downloaded": downloaded,
-        "skipped": skipped,
-        "failed": failed,
-        "errors": errors,
-    }
+    return {"downloaded": downloaded, "skipped": skipped, "failed": failed, "errors": errors}
 
 
-def _remove_tracks(
-    tracks: list[PluginTrackState],
-    state: PluginState,
-    download_dir: Path,
-    data_dir: Path | None = None,
-) -> int:
-    """Remove tracks from filesystem and state.
-
-    Only deletes files if they are not referenced by other playlists or plugins.
-
-    Args:
-        tracks: Tracks to remove
-        state: Plugin state to update
-        download_dir: Download directory (used to check cross-references)
-        data_dir: Data directory for state files (defaults to config.data_dir)
-
-    Returns:
-        Number of tracks deleted
-    """
+def _remove_tracks(tracks: list[PluginTrackState], state: PluginState, download_dir: Path, data_dir: Path | None = None) -> int:
+    """Remove tracks from filesystem and state."""
     if data_dir is None:
         from kikusan.config import get_config
         data_dir = get_config().data_dir
-    deleted = 0
-    skipped = 0
-
-    # Fetch Navidrome protection data once for batch
+    deleted, skipped = 0, 0
     navidrome_cache = get_navidrome_protection_cache()
 
     for track in tracks:
         logger.info("Removing: %s - %s", track.artist, track.title)
-
         file_path = Path(track.file_path)
 
-        # Check if file is referenced by other playlists/plugins
         if file_path.exists():
-            if not is_safe_to_delete(
-                file_path,
-                data_dir,
-                current_plugin_name=state.plugin_name,
-                navidrome_cache=navidrome_cache,
-            ):
-                logger.info(
-                    "Skipping deletion of %s (referenced by other playlists/plugins)",
-                    file_path.name,
-                )
+            if not is_safe_to_delete(file_path, data_dir, current_plugin_name=state.plugin_name, navidrome_cache=navidrome_cache):
+                logger.info("Skipping deletion of %s (referenced by other playlists/plugins)", file_path.name)
                 skipped += 1
-                # Still remove from current plugin state
                 state.tracks = [t for t in state.tracks if t.cache_key != track.cache_key]
                 continue
-
-            # Safe to delete - no other references
             try:
                 file_path.unlink()
                 deleted += 1
-
-                # Remove .lrc if exists
                 lrc_path = file_path.with_suffix(".lrc")
-                if lrc_path.exists():
-                    lrc_path.unlink()
+                if lrc_path.exists(): lrc_path.unlink()
             except Exception as e:
                 logger.error("Failed to delete %s: %s", file_path, e)
                 continue
 
-        # Remove from state
         state.tracks = [t for t in state.tracks if t.cache_key != track.cache_key]
 
     if skipped > 0:
-        logger.info(
-            "Skipped deletion of %d file(s) referenced by other sources",
-            skipped,
-        )
-
+        logger.info("Skipped deletion of %d file(s) referenced by other sources", skipped)
     return deleted
 
 
 def _update_m3u(name: str, state: PluginState, download_dir: Path) -> None:
     """Update M3U playlist."""
-    if not state.tracks:
-        return
+    if not state.tracks: return
 
     file_paths = []
     for track in state.tracks:
