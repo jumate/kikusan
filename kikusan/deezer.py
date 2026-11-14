@@ -9,8 +9,9 @@ from kikusan.models.deezer import DeezerTrack
 
 logger = logging.getLogger(__name__)
 
-DEEZER_PLAYLIST_PATTERN = re.compile(
-    r"(?:https?://)?(?:www\.)?deezer\.com/(?:[a-z]{2}/)?playlist/(\d+)"
+# Patrón actualizado para capturar tanto playlists como álbumes
+DEEZER_URL_PATTERN = re.compile(
+    r"(?:https?://)?(?:www\.)?deezer\.com/(?:[a-z]{2}/)?(playlist|album)/(\d+)"
 )
 DEEZER_API_BASE = "https://api.deezer.com"
 DEEZER_PAGE_SIZE = 100
@@ -25,16 +26,16 @@ class DeezerQuotaError(DeezerAPIError):
 
 
 def is_deezer_url(url: str) -> bool:
-    """Check if a URL is a Deezer playlist URL."""
-    return bool(DEEZER_PLAYLIST_PATTERN.match(url))
+    """Check if a URL is a Deezer playlist or album URL."""
+    return bool(DEEZER_URL_PATTERN.match(url))
 
 
-def _extract_playlist_id(url: str) -> int:
-    """Extract Deezer playlist ID from URL."""
-    match = DEEZER_PLAYLIST_PATTERN.match(url)
+def _extract_id_and_type(url: str) -> tuple[str, int]:
+    """Extract Deezer item type (playlist/album) and ID from URL."""
+    match = DEEZER_URL_PATTERN.match(url)
     if not match:
-        raise ValueError(f"Invalid Deezer playlist URL: {url}")
-    return int(match.group(1))
+        raise ValueError(f"Invalid Deezer URL: {url}")
+    return match.group(1), int(match.group(2))
 
 
 def _request_deezer_json(path: str, params: dict | None = None) -> dict:
@@ -92,14 +93,12 @@ def _track_from_payload(track_data: dict) -> DeezerTrack:
     )
 
 
-def get_playlist_tracks(url: str) -> list[DeezerTrack]:
+def get_playlist_tracks(playlist_id: int) -> list[DeezerTrack]:
     """
-    Fetch tracks from a Deezer playlist URL.
+    Fetch tracks from a Deezer playlist ID.
 
     Uses Deezer REST pagination to avoid per-track API calls that quickly hit quota.
     """
-    playlist_id = _extract_playlist_id(url)
-
     # Initial call is used only to read total/metadata.
     playlist_payload = _request_deezer_json(f"/playlist/{playlist_id}")
     playlist_title = playlist_payload.get("title", f"Playlist {playlist_id}")
@@ -130,8 +129,35 @@ def get_playlist_tracks(url: str) -> list[DeezerTrack]:
     return tracks
 
 
+def get_album_tracks(album_id: int) -> list[DeezerTrack]:
+    """
+    Fetch tracks from a Deezer album ID.
+
+    Album tracks usually come in the initial response payload, so pagination
+    is generally not required like it is for large playlists.
+    """
+    album_payload = _request_deezer_json(f"/album/{album_id}")
+    album_title = album_payload.get("title", f"Album {album_id}")
+    logger.info("Fetching Deezer album: %s", album_title)
+
+    tracks: list[DeezerTrack] = []
+    tracks_data = album_payload.get("tracks", {}).get("data", [])
+    
+    for item in tracks_data:
+        if isinstance(item, dict):
+            tracks.append(_track_from_payload(item))
+
+    logger.info("Found %d tracks in Deezer album", len(tracks))
+    return tracks
+
+
 def get_tracks_from_url(url: str) -> list[DeezerTrack]:
-    """Fetch tracks from a Deezer URL."""
-    if DEEZER_PLAYLIST_PATTERN.match(url):
-        return get_playlist_tracks(url)
+    """Fetch tracks from a Deezer URL (playlist or album)."""
+    item_type, item_id = _extract_id_and_type(url)
+    
+    if item_type == "playlist":
+        return get_playlist_tracks(item_id)
+    elif item_type == "album":
+        return get_album_tracks(item_id)
+        
     raise ValueError(f"Unsupported Deezer URL: {url}")

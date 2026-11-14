@@ -42,7 +42,8 @@ class DownloadJob(BaseModel):
     nested_folders: bool = True
     custom_album_name: Optional[str] = None
     is_compilation: bool = False
-    original_album: Optional[str] = None    
+    original_album: Optional[str] = None
+    cover_url: Optional[str] = None
 
     def model_post_init(self, __context) -> None:
         """Set created_at to now if not provided (sentinel default)."""

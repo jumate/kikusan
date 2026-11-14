@@ -897,38 +897,83 @@ async def add_to_queue(request: QueueAddRequest, http_request: Request):
 
 @app.post("/api/queue/add-playlist")
 async def add_playlist_to_queue(request: QueueAddPlaylistRequest, http_request: Request):
-    """Add all tracks from a playlist URL to the queue with pure_album mode."""
+    """Add all tracks from a playlist URL (YouTube or Deezer) to the queue as an album."""
     if not queue_manager:
         raise HTTPException(status_code=500, detail="Queue manager not initialized")
 
-    from kikusan.search import get_playlist_tracks, parse_youtube_url
+    from kikusan.deezer import get_tracks_from_url as get_deezer_tracks_from_url
+    from kikusan.deezer import is_deezer_url
+    from kikusan.search import get_playlist_tracks, parse_youtube_url, search as yt_search
     import logging
     logger = logging.getLogger(__name__)
 
-    url_info = parse_youtube_url(request.url)
-    if not url_info or url_info['type'] != 'playlist':
-        raise HTTPException(status_code=400, detail="Invalid YouTube playlist URL")
-
     config = get_config()
+    tracks = []
+    playlist_title = "Unknown Album"
 
     try:
-        # 1. Obtener el título real de la playlist usando yt-dlp
-        ydl_opts_info = {"quiet": True, "no_warnings": True, "extract_flat": True}
-        playlist_info = extract_info_with_retry(
-            ydl_opts=ydl_opts_info, 
-            url=request.url, 
-            download=False, 
-            cookie_file=config.cookie_file_path, 
-            config=config
-        )
-        playlist_title = playlist_info.get("title", "Unknown Album")
+        if is_deezer_url(request.url):
+            # --- Lógica para Deezer (Playlist o Álbum) ---
+            logger.info("Processing Deezer URL: %s", request.url)
+            
+            import urllib.request
+            import json
+            import re
+            
+            cover_url = None
+            try:
+                match = re.search(r'/(?:playlist|album)/(\d+)', request.url)
+                item_id = match.group(1) if match else request.url.split('/')[-1]
+                
+                # Si es un álbum, usamos el endpoint /album/
+                if "/album/" in request.url:
+                    api_url = f"https://api.deezer.com/album/{item_id}"
+                else:
+                    api_url = f"https://api.deezer.com/playlist/{item_id}"
+                
+                with urllib.request.urlopen(api_url, timeout=10) as response:
+                    data = json.loads(response.read().decode())
+                    playlist_title = data.get("title", f"Deezer Item {item_id}")
+                    cover_url = data.get("cover_xl") or data.get("cover_big") or data.get("cover_medium")
+            except Exception as e:
+                logger.warning("No se pudo obtener la info de Deezer: %s", e)
+                playlist_title = f"Deezer Item {request.url.split('/')[-1]}"
 
-        # 2. Obtener las canciones
-        tracks = get_playlist_tracks(url_info['id'], allow_ugc=True)
-        if not tracks:
-            raise HTTPException(status_code=404, detail="No tracks found in playlist")
+            # 2. Obtener y procesar las canciones
+            deezer_tracks = get_deezer_tracks_from_url(request.url)
+            if not deezer_tracks:
+                raise HTTPException(status_code=404, detail="Deezer playlist is empty or unavailable")
 
-        # 3. Calcular el artista y el nombre del álbum final
+            for dz_track in deezer_tracks:
+                yt_results = yt_search(dz_track.search_query, limit=1)
+                if yt_results:
+                    tracks.append(yt_results[0])
+                else:
+                    logger.warning("No YouTube Music match for Deezer track: %s - %s", dz_track.artist, dz_track.name)
+            
+            if not tracks:
+                raise HTTPException(status_code=404, detail="No Deezer tracks could be matched on YouTube Music")
+
+        else:
+            # --- Lógica para YouTube ---
+            url_info = parse_youtube_url(request.url)
+            if not url_info or url_info['type'] != 'playlist':
+                raise HTTPException(status_code=400, detail="Invalid YouTube playlist URL")
+            
+            # Obtener el título real de la playlist de YouTube
+            ydl_opts_info = {"quiet": True, "no_warnings": True, "extract_flat": True}
+            playlist_info = extract_info_with_retry(
+                ydl_opts=ydl_opts_info, url=request.url, download=False, 
+                cookie_file=config.cookie_file_path, config=config
+            )
+            playlist_title = playlist_info.get("title", "Unknown Album")
+
+            # Obtener las canciones de YouTube
+            tracks = get_playlist_tracks(url_info['id'], allow_ugc=True)
+            if not tracks:
+                raise HTTPException(status_code=404, detail="No tracks found in playlist")
+
+        # --- Lógica común para ambos (calcular metadatos del álbum) ---
         unique_artists = set()
         unique_albums = set()
         
@@ -938,12 +983,9 @@ async def add_playlist_to_queue(request: QueueAddPlaylistRequest, http_request: 
             if t.album:
                 unique_albums.add(t.album)
         
-        # Es compilación si hay varios artistas o si hay varios álbumes originales
         is_compilation = len(unique_artists) > 1 or len(unique_albums) > 1
         album_artist = "Varios Artistas" if is_compilation else list(unique_artists)[0]
         
-        # Si todas las canciones tienen el mismo álbum original, usamos ese.
-        # Si no, usamos el nombre de la playlist de YouTube.
         if len(unique_albums) == 1:
             custom_album_name = list(unique_albums)[0]
         else:
@@ -967,7 +1009,8 @@ async def add_playlist_to_queue(request: QueueAddPlaylistRequest, http_request: 
                 nested_folders=request.nested_folders,
                 custom_album_name=custom_album_name,
                 is_compilation=is_compilation,
-                original_album=track.album, # Pasamos el álbum original de la canción
+                original_album=track.album,
+                cover_url=cover_url, 
             )
             job_ids.append(job_id)
 
@@ -980,7 +1023,8 @@ async def add_playlist_to_queue(request: QueueAddPlaylistRequest, http_request: 
     except Exception as e:
         logger.error("Failed to queue playlist: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
-
+        
+        
 @app.post("/api/queue/add-album")
 async def add_album_to_queue(request: QueueAddAlbumRequest, http_request: Request):
     """Add all tracks from an album to the download queue."""

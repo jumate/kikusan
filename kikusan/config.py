@@ -31,6 +31,7 @@ class Config:
     gotify_url: str | None = None
     gotify_token: str | None = None
     yt_dlp_cookie_file: str | None = None
+    ytmusic_cookie_file: str | None = None
     cookie_mode: str = "auto"
     cookie_retry_delay: float = 1.0
     log_cookie_usage: bool = True
@@ -40,6 +41,7 @@ class Config:
     multi_user: bool = False
     replaygain: bool = False
     allow_ugc: bool = False
+    
 
     def effective_playlist_name(self, remote_user: str | None) -> str | None:
         """Return the playlist name, optionally prefixed with the remote user."""
@@ -157,6 +159,7 @@ class Config:
             multi_user=multi_user,
             replaygain=replaygain,
             allow_ugc=allow_ugc,
+            ytmusic_cookie_file=os.getenv("YTMUSIC_COOKIE_FILE"),
         )
 
     @property

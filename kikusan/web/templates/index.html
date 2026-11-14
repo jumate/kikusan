@@ -424,7 +424,7 @@
           const host = url.hostname.replace(/^www\./, "").toLowerCase();
 
           if (host === "deezer.com") {
-            return url.pathname.includes("/playlist/");
+            return url.pathname.includes("/playlist/") || url.pathname.includes("/album/");
           }
 
           if (

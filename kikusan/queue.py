@@ -70,6 +70,7 @@ class QueueManager:
         custom_album_name: Optional[str] = None,
         is_compilation: bool = False,
         original_album: Optional[str] = None,
+        cover_url: Optional[str] = None,
     ) -> str:
         """
         Add a download job to the queue.
@@ -109,6 +110,7 @@ class QueueManager:
             custom_album_name=custom_album_name,
             is_compilation=is_compilation,
             original_album=original_album,
+            cover_url=cover_url,
         )
         async with self._jobs_lock:
             self.jobs[job_id] = job
@@ -176,6 +178,29 @@ class QueueManager:
         try:
             # Determinar el modo de organización
             target_mode = "pure_album" if job.is_pure_album else config.organization_mode
+            
+            
+            # NUEVO: Descargar portada si es una playlist y no existe ya
+            if job.is_pure_album and job.cover_url:
+                try:
+                    from kikusan.download import _get_pure_album_dir
+                    import urllib.request
+                    
+                    # Calculamos la ruta donde irá el álbum
+                    info = {"album": job.custom_album_name, "artist": job.album_artist}
+                    target_dir = _get_pure_album_dir(
+                        config.download_dir, info, job.album_artist, 
+                        job.nested_folders, job.custom_album_name
+                    )
+                    target_dir.mkdir(parents=True, exist_ok=True)
+                    cover_path = target_dir / "folder.jpg"
+                    
+                    # Si no existe la portada, la descargamos
+                    if not cover_path.exists():
+                        logger.info("Downloading cover art to %s", cover_path)
+                        urllib.request.urlretrieve(job.cover_url, cover_path)
+                except Exception as e:
+                    logger.warning("Failed to download cover art: %s", e)
 
             # Run download in thread pool to avoid blocking
             loop = asyncio.get_event_loop()
@@ -205,22 +230,34 @@ class QueueManager:
             if audio_path and job.is_pure_album and job.move_to_root:
                 try:
                     recent_dir = Path(config.download_dir) / "recent_download"
-                    # Asegurarnos de que el archivo está dentro de recent_download
                     if recent_dir in audio_path.parents:
-                        # Guardamos la referencia a la carpeta origen antes de cambiar la ruta
                         source_folder = audio_path.parent                         
                         rel_path = audio_path.relative_to(recent_dir)
                         new_path = Path(config.download_dir) / rel_path
                         new_path.parent.mkdir(parents=True, exist_ok=True)
 
-                        # Movemos el audio
+                        # 1. Movemos el audio
                         shutil.move(str(audio_path), str(new_path))
                         
-                        # Movemos el archivo .lrc si existe
+                        # 2. Movemos el archivo .lrc si existe
                         old_lrc = audio_path.with_suffix('.lrc')
                         new_lrc = new_path.with_suffix('.lrc')
                         if old_lrc.exists():
                             shutil.move(str(old_lrc), str(new_lrc))
+
+                        # 3. Movemos la portada folder.jpg si existe
+                        old_cover = source_folder / "folder.jpg"
+                        new_cover = new_path.parent / "folder.jpg"
+                        if old_cover.exists() and not new_cover.exists():
+                            shutil.move(str(old_cover), str(new_cover))
+
+                        # 4. Borrar archivos temporales (.webp, .jpg) huérfanos de la carpeta origen
+                        for temp_img in source_folder.glob("*.webp"):
+                            try:
+                                temp_img.unlink()
+                                logger.info("Deleted orphan temp image: %s", temp_img.name)
+                            except OSError:
+                                pass
                         
                         # Intentar borrar la carpeta de origen si se ha quedado vacía
                         try:
@@ -232,10 +269,8 @@ class QueueManager:
                                 source_folder.parent.rmdir()
                                 logger.info("Carpeta temporal de artista eliminada: %s", source_folder.parent)
                         except OSError:
-                            # Si la carpeta no está vacía, ignoramos el error
                             pass                            
 
-                        # Actualizamos la ruta para que el resto del proceso (M3U y UI) use la nueva
                         audio_path = new_path
                         logger.info("Álbum movido a la raíz: %s", audio_path.parent)
                 except Exception as move_err:

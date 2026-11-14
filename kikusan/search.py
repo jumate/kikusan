@@ -29,6 +29,31 @@ VIDEO_TYPE_OFFICIAL_SOURCE = "MUSIC_VIDEO_TYPE_OFFICIAL_SOURCE_MUSIC"
 ALLOWED_VIDEO_TYPES = frozenset({VIDEO_TYPE_ATV, VIDEO_TYPE_OMV})
 
 
+def _get_ytmusic_client() -> YTMusic:
+    """Initialize and return a YTMusic client.
+
+    If a specific YTMUSIC_COOKIE_FILE is configured, it will use it to authenticate
+    (e.g., with a primary account's browser.json). Otherwise, it falls back to
+    an anonymous session.
+    """
+    config = get_config()
+    auth_file = getattr(config, "ytmusic_cookie_file", None)
+    
+    if auth_file:
+        try:
+            logger.debug("Initializing YTMusic client with auth file: %s", auth_file)
+            return YTMusic(auth=auth_file)
+        except Exception as e:
+            logger.error(
+                "Failed to initialize authenticated YTMusic client using '%s': %s. "
+                "Falling back to anonymous.", 
+                auth_file, e
+            )
+            return YTMusic()
+    
+    return YTMusic()
+
+
 def is_allowed_video_type(video_type: str | None, allow_ugc: bool = False) -> bool:
     """Check if a video type should be included in results.
 
@@ -71,7 +96,7 @@ def search(query: str, limit: int = 20) -> list[Track]:
     Raises:
         Exception: If YouTube Music API fails (e.g., JSONDecodeError, network error)
     """
-    yt = YTMusic()
+    yt = _get_ytmusic_client()
     try:
         results = yt.search(query, filter="songs", limit=limit)
     except Exception as e:
@@ -134,7 +159,7 @@ def search_albums(query: str, limit: int = 20) -> list[Album]:
     Raises:
         Exception: If YouTube Music API fails (e.g., JSONDecodeError, network error)
     """
-    yt = YTMusic()
+    yt = _get_ytmusic_client()
     try:
         results = yt.search(query, filter="albums", limit=limit)
     except Exception as e:
@@ -189,7 +214,7 @@ def get_album_tracks(browse_id: str) -> list[Track]:
     Raises:
         Exception: If YouTube Music API fails (e.g., JSONDecodeError, network error)
     """
-    yt = YTMusic()
+    yt = _get_ytmusic_client()
     try:
         album_info = yt.get_album(browse_id)
     except Exception as e:
@@ -240,7 +265,7 @@ def get_new_releases() -> list[Album]:
     Raises:
         Exception: If YouTube Music API fails (e.g., JSONDecodeError, network error)
     """
-    yt = YTMusic()
+    yt = _get_ytmusic_client()
     try:
         raw = yt.get_explore()
     except Exception as e:
@@ -285,7 +310,7 @@ def get_mood_categories() -> list[MoodSection]:
     Raises:
         Exception: If YouTube Music API fails (e.g., JSONDecodeError, network error)
     """
-    yt = YTMusic()
+    yt = _get_ytmusic_client()
     try:
         raw = yt.get_mood_categories()
     except Exception as e:
@@ -327,7 +352,7 @@ def get_mood_playlists(params: str) -> list[MoodPlaylist]:
         Exception: If YouTube Music API fails (non-KeyError exceptions propagate;
                    KeyError triggers fallback to manual parsing)
     """
-    yt = YTMusic()
+    yt = _get_ytmusic_client()
     try:
         raw = yt.get_mood_playlists(params)
     except KeyError as e:
@@ -523,7 +548,7 @@ def get_charts(country: str = "ZZ", allow_ugc: bool = False) -> Charts:
         Exception: If YouTube Music API fails to fetch chart metadata. Individual
                    playlist fetch errors are logged and retried with next playlist.
     """
-    yt = YTMusic()
+    yt = _get_ytmusic_client()
     try:
         raw = yt.get_charts(country)
     except Exception as e:
@@ -638,7 +663,7 @@ def get_playlist_tracks(playlist_id: str, allow_ugc: bool = False) -> list[Track
             "Radio playlists use a different API structure and cannot be fetched."
         )
 
-    yt = YTMusic()
+    yt = _get_ytmusic_client()
     try:
         raw = yt.get_playlist(playlist_id)
     except Exception as e:
@@ -740,7 +765,7 @@ def get_song_metadata(video_id: str) -> SongMetadata | None:
                 duration_seconds=cached.duration_seconds,
             )
 
-    yt = YTMusic()
+    yt = _get_ytmusic_client()
     try:
         song_data = yt.get_song(video_id)
     except Exception as e:
@@ -1013,7 +1038,7 @@ def get_track_from_video_id(video_id: str) -> Track:
                 video_type=cached.video_type,
             )
 
-    yt = YTMusic()
+    yt = _get_ytmusic_client()
     try:
         song_data = yt.get_song(video_id)
     except Exception as e:

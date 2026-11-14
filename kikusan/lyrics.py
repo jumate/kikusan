@@ -515,7 +515,7 @@ def _search_lyrics(
         duration_tolerance = 3
         matching_results = [
             r for r in results
-            if abs(r.get("duration", 0) - duration_seconds) <= duration_tolerance
+            if r.get("duration") is not None and abs(r["duration"] - duration_seconds) <= duration_tolerance
         ]
 
         # If duration filtering removes all results, use the full result set

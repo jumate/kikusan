@@ -24,6 +24,7 @@ kikusan = "kikusan.cli:main"
 
 [project.entry-points."kikusan.plugins"]
 # Third-party plugins can register here
+lastfm_similar = "kikusan.plugins.lastfm_similar:LastfmSimilarPlugin"
 
 [build-system]
 requires = ["hatchling"]
