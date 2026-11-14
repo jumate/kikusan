@@ -2,6 +2,7 @@
 
 import logging
 import shutil
+import os  # <-- AÑADIDO para la limpieza
 from datetime import datetime
 from pathlib import Path
 
@@ -83,6 +84,7 @@ def sync_plugin_instance(
             new_songs,
             config,
             state,
+            plugin=plugin,  # <-- Pasamos el plugin para la comprobación en Navidrome
             flow_name=flow_name,
         )
 
@@ -127,6 +129,28 @@ def sync_plugin_instance(
             failed=1,
             errors=[str(e)],
         )
+    finally:
+        # NUEVO: Limpieza final de la carpeta recent_download si se ha quedado vacía
+        _cleanup_recent_download(config.download_dir)
+
+
+def _cleanup_recent_download(download_dir: Path):
+    """Intenta borrar la carpeta recent_download si está vacía."""
+    recent_dir = download_dir / "recent_download"
+    if recent_dir.exists():
+        try:
+            # Recorremos de abajo hacia arriba para borrar carpetas vacías
+            for root, dirs, files in os.walk(recent_dir, topdown=False):
+                for name in dirs:
+                    try:
+                        os.rmdir(os.path.join(root, name))
+                    except OSError:
+                        pass
+            # Finalmente intentamos borrar la raíz recent_download
+            recent_dir.rmdir()
+            logger.info("Carpeta 'recent_download' eliminada por estar vacía.")
+        except OSError:
+            pass
 
 
 def _compare_songs(
@@ -150,6 +174,7 @@ def _download_songs(
     songs: list[Song],
     config: PluginConfig,
     state: PluginState,
+    plugin: Plugin,  # <-- AÑADIDO
     flow_name: str | None = None,
 ) -> dict:
     """Download songs and update state."""
@@ -168,6 +193,11 @@ def _download_songs(
         # Check if already in state (by cache_key)
         if any(t.cache_key == song.cache_key for t in state.tracks):
             logger.info("  Already downloaded, skipping")
+            skipped += 1
+            continue           
+
+        # 1. Comprobar si ya existe en Navidrome (usando el objeto plugin)
+        if hasattr(plugin, "_is_already_in_navidrome") and plugin._is_already_in_navidrome(song.artist, song.title):
             skipped += 1
             continue
 
