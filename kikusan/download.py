@@ -369,7 +369,8 @@ def _apply_pure_album_tags(
     is_compilation: bool, 
     album_artist: str = None, 
     custom_album_name: str = None,
-    original_album: str = None
+    original_album: str = None,
+    comment: str = None # <-- AÑADIDO
 ) -> None:
     """Aplica COMPILATION, ALBUMARTIST y ORIGINALALBUM dependiendo del contexto."""
     try:
@@ -397,6 +398,10 @@ def _apply_pure_album_tags(
             # Si es un solo artista, asignamos su nombre al ALBUMARTIST (Title Case)
             target_album_artist = album_artist.title() if album_artist else (audio.get("artist", ["Unknown"])[0])
             audio["ALBUMARTIST"] = [target_album_artist]
+            
+        # NUEVO: Escribir el comentario por separado
+        if comment:
+            audio["COMMENT"] = [comment]
             
         audio.save()
     except Exception as e:
@@ -432,6 +437,7 @@ def download(
     custom_album_name: str = None,
     is_compilation: bool = False,
     original_album: str = None,
+    comment: str = None, # <-- AÑADIDO
 ) -> Path:
     """
     Download a track from YouTube Music.
@@ -452,6 +458,7 @@ def download(
         custom_album_name: Override album name (pure_album only)
         is_compilation: Whether this album is a compilation
         original_album: Original album name to save in tags
+        comment: Reason for the recommendation to save in tags (optional)
 
     Returns:
         Path to the downloaded audio file
@@ -567,7 +574,8 @@ def download(
                 is_compilation=is_compilation, 
                 album_artist=album_artist, 
                 custom_album_name=custom_album_name, 
-                original_album=original_album
+                original_album=original_album,
+                comment=comment # <-- AÑADIDO
             )
 
         # APLICAMOS EL RECORTE DE PORTADA AQUÍ

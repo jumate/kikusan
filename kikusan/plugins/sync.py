@@ -1,8 +1,10 @@
 """Plugin synchronization logic."""
 
 import logging
+import re
 import shutil
 import os
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 
@@ -97,81 +99,93 @@ def sync_plugin_instance(
         _cleanup_recent_download(config.download_dir)
 
 
+AUDIO_EXTENSIONS = {".opus", ".mp3", ".flac", ".m4a", ".ogg", ".wav", ".aac"}
+
+
+def _norm(text: str) -> str:
+    """Normaliza para comparar: sin acentos, sin mayúsculas ni puntuación (' y ’ cuentan igual)."""
+    text = unicodedata.normalize("NFKD", text or "").casefold()
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    return re.sub(r"[\W_]+", " ", text).strip()
+
+
 def _purge_disliked_tracks(plugin: Plugin, state: PluginState, rating_threshold: int, config: PluginConfig) -> int:
-    """Busca en el estado las canciones y borra los archivos físicos que tengan la calificación indicada en Navidrome."""
+    """Busca en la carpeta del Flow las canciones y borra los archivos físicos que tengan la calificación indicada en Navidrome.
+
+    Busca dentro de la carpeta del Flow (no depende de que la canción esté en el estado):
+    primero por el nombre de fichero que informa Navidrome y, si no, por título + artista.
+    El estado se deja intacto a propósito: así Kikusan recuerda la canción y no la vuelve a descargar.
+    """
     logger.info("Obteniendo la lista de canciones marcadas con %d estrellas desde Navidrome...", rating_threshold)
-    
-    disliked_songs = plugin.get_disliked_songs(rating_threshold)
-    
-    if not disliked_songs:
+    rated = plugin.get_disliked_songs(rating_threshold)
+
+    if not rated:
         logger.info("No se han encontrado canciones con %d estrellas en Navidrome.", rating_threshold)
         return 0
 
-    logger.info("Navidrome ha reportado %d canciones con %d estrellas. Comprobando si alguna está en el Flow...", len(disliked_songs), rating_threshold)
-    deleted_count = 0
-    
-    for track in state.tracks:
-        file_path = Path(track.file_path)
-        
-        if not file_path.exists():
-            continue
-            
-        # Usamos el nombre del archivo sin la extensión como principal fuente de verdad
-        file_name = file_path.stem.lower().strip()
-        t_title = track.title.lower().strip()
-        t_artist = track.artist.lower().strip()
-        
-        match = False
-        for d_title, d_artist in disliked_songs:
-            # Comprobación 1: El nombre del archivo coincide con el título de Navidrome
-            file_match = (d_title in file_name) or (file_name in d_title)
-            
-            # Comprobación 2: Los tags coinciden
-            title_match = (t_title == d_title) or (t_title in d_title) or (d_title in t_title)
-            
-            # Comprobación laxa de artista: si Kikusan no supo el artista (Unknown, Varios), lo ignoramos
-            # o comprobamos si una parte del nombre del artista está en el otro.
-            artist_match = (t_artist in d_artist) or (d_artist in t_artist) or (t_artist in ["unknown", "unknown artist", "varios artistas", ""])
-            
-            if (file_match or title_match) and artist_match:
-                match = True
-                logger.info("  [MATCH] Kikusan: '%s' (Artista: %s) <==> Navidrome: '%s' (Artista: %s)", file_path.name, t_artist, d_title, d_artist)
-                break
-        
-        if match:
-            logger.info("Borrando archivo (1 estrella): %s", file_path.name)
-            try:
-                file_path.unlink()
-                lrc_path = file_path.with_suffix(".lrc")
-                if lrc_path.exists():
-                    lrc_path.unlink()
-                deleted_count += 1
-            except OSError as e:
-                logger.error("No se pudo borrar el archivo %s: %s", file_path, e)
+    flow_dir = Path(config.download_dir) / (config.config.get("flow_name") or config.name)
+    files = [p for p in flow_dir.rglob("*") if p.is_file() and p.suffix.lower() in AUDIO_EXTENSIONS]
+    logger.info(
+        "Navidrome reporta %d canciones con %d estrellas; hay %d ficheros de audio en %s",
+        len(rated), rating_threshold, len(files), flow_dir,
+    )
 
-    if deleted_count > 0:
-        logger.info("Se han borrado físicamente %d archivos marcados con %d estrellas.", deleted_count, rating_threshold)
-    else:
-        logger.info("Ninguna de las canciones del Flow está marcada con %d estrellas en Navidrome o ya no existen en el disco.", rating_threshold)
-        
+    deleted_count = 0
+    for song in rated:
+        # Usamos el nombre del archivo sin la extensión como principal fuente de verdad
+        nav_stem = _norm(Path(song["path"]).stem) if song.get("path") else ""
+        n_title = _norm(song.get("title", ""))
+        n_artist = _norm(song.get("artist", ""))
+
+        # Comprobación laxa de artista: si Navidrome no supo el artista (Unknown, Varios), lo ignoramos
+        # o comprobamos si una parte del nombre del artista está en el nombre del archivo.
+        artist_unknown = n_artist in ("", "unknown", "unknown artist", "varios artistas")
+
+        match = None
+        for p in files:
+            stem = _norm(p.stem)
+            if (
+                # Comprobación 1: El nombre del archivo coincide con la ruta o el título de Navidrome
+                (nav_stem and stem == nav_stem)
+                or (n_title and stem == n_title)
+                # Comprobación 2: El título y el artista de Navidrome aparecen en el nombre del archivo
+                or (n_title and n_title in stem and (artist_unknown or n_artist in stem))
+            ):
+                match = p
+                break
+
+        if match is None:
+            logger.warning(
+                "  Sin coincidencia en %s para '%s' - '%s' (ruta en Navidrome: %s)",
+                flow_dir.name, song.get("artist"), song.get("title"), song.get("path"),
+            )
+            continue
+
+        logger.info("  [MATCH] Borrando (%d estrellas): %s", rating_threshold, match.name)
+        try:
+            match.unlink()
+            lrc_path = match.with_suffix(".lrc")
+            if lrc_path.exists():
+                lrc_path.unlink()
+            files.remove(match)
+            deleted_count += 1
+        except OSError as e:
+            logger.error("No se pudo borrar el archivo %s: %s", match, e)
+
+    logger.info("Borrados %d archivos con %d estrellas.", deleted_count, rating_threshold)
     return deleted_count
-    
-    
+
+
 def _cleanup_recent_download(download_dir: Path):
-    """Intenta borrar la carpeta recent_download si está vacía."""
+    """Borra la carpeta recent_download y todo su contenido residual."""
     recent_dir = download_dir / "recent_download"
     if recent_dir.exists():
         try:
-            for root, dirs, files in os.walk(recent_dir, topdown=False):
-                for name in dirs:
-                    try:
-                        os.rmdir(os.path.join(root, name))
-                    except OSError:
-                        pass
-            recent_dir.rmdir()
-            logger.info("Carpeta 'recent_download' eliminada por estar vacía.")
-        except OSError:
-            pass
+            # shutil.rmtree borra la carpeta y TODO su contenido (archivos .webp, .lrc, etc.)
+            shutil.rmtree(recent_dir)
+            logger.info("Carpeta 'recent_download' eliminada junto con sus archivos residuales.")
+        except Exception as e:
+            logger.warning("No se pudo eliminar la carpeta 'recent_download': %s", e)
 
 
 def _compare_songs(current: list[Song], state: PluginState) -> tuple[list[Song], list[PluginTrackState]]:
@@ -261,6 +275,7 @@ def _download_songs(
                 custom_album_name=custom_album_name,
                 is_compilation=is_compilation,
                 original_album=original_album,
+                comment=song.reason, # <-- AÑADIDO
             )
 
             if audio_path:
