@@ -370,7 +370,8 @@ def _apply_pure_album_tags(
     album_artist: str = None, 
     custom_album_name: str = None,
     original_album: str = None,
-    comment: str = None # <-- AÑADIDO
+    comment: str = None, # <-- AÑADIDO
+    genre: str = None # <-- AÑADIDO
 ) -> None:
     """Aplica COMPILATION, ALBUMARTIST y ORIGINALALBUM dependiendo del contexto."""
     try:
@@ -402,6 +403,10 @@ def _apply_pure_album_tags(
         # NUEVO: Escribir el comentario por separado
         if comment:
             audio["COMMENT"] = [comment]
+            
+        # NUEVO: Escribir el género
+        if genre and genre.lower() != "unknown":
+            audio["genre"] = [genre.title()]
             
         audio.save()
     except Exception as e:
@@ -438,6 +443,7 @@ def download(
     is_compilation: bool = False,
     original_album: str = None,
     comment: str = None, # <-- AÑADIDO
+    genre: str = None, # <-- AÑADIDO
 ) -> Path:
     """
     Download a track from YouTube Music.
@@ -459,6 +465,7 @@ def download(
         is_compilation: Whether this album is a compilation
         original_album: Original album name to save in tags
         comment: Reason for the recommendation to save in tags (optional)
+        genre: Music genre to save in tags (optional)
 
     Returns:
         Path to the downloaded audio file
@@ -575,7 +582,8 @@ def download(
                 album_artist=album_artist, 
                 custom_album_name=custom_album_name, 
                 original_album=original_album,
-                comment=comment # <-- AÑADIDO
+                comment=comment, # <-- AÑADIDO
+                genre=genre # <-- AÑADIDO
             )
 
         # APLICAMOS EL RECORTE DE PORTADA AQUÍ

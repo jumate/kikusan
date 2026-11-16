@@ -18,6 +18,7 @@ class Song:
     duration_seconds: int | None = None
     artists: list[str] | None = None
     reason: str | None = None  # <-- NUEVO: Motivo de la recomendación (ej. "Similar to X")
+    genre: str | None = None  
 
     @property
     def search_query(self) -> str:

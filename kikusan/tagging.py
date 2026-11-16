@@ -384,6 +384,21 @@ def _tag_metadata(file_path: Path, *, root_dir: Path, enrichment_cache: Enrichme
     needs_artist = not partial.artist
     needs_album = not partial.album
     needs_cover = not partial.has_cover
+
+    # Si tiene un motivo (COMMENT) que empieza por corchete, es del Flow. No sobreescribir álbum.
+    if needs_album:
+        try:
+            from mutagen import File
+            audio = File(file_path)
+            if audio:
+                comment = audio.get("COMMENT") or audio.get("comment")
+                if comment:
+                    comment_str = comment[0] if isinstance(comment, list) else str(comment)
+                    if comment_str.startswith("["):
+                        needs_album = False
+        except Exception:
+            pass
+
     if not (needs_title or needs_artist or needs_album or needs_cover):
         stats.metadata_skipped += 1
         return
@@ -511,7 +526,7 @@ def tag_directory(
     enrichment_cache = _make_enrichment_cache(config.data_dir, ttl_hours) if do_metadata else None
     lyrics_cache_dir = config.data_dir if do_lyrics else None
     
-    is_pure_album = (config.organization_mode == "pure_album")
+    is_pure_album_configured = (config.organization_mode == "pure_album")
 
     # Agrupamos los archivos por su carpeta (asumiendo que cada carpeta es un álbum)
     folders = defaultdict(list)
@@ -520,10 +535,13 @@ def tag_directory(
 
     for folder, folder_files in folders.items():
         # --- LÓGICA GLOBAL PARA PURE_ALBUM EN CARPETAS ---
+        # Aplicamos la lógica SOLO si la carpeta procesada es la raíz exacta
+        folder_is_pure_album = is_pure_album_configured and (folder == directory)
+        
         album_is_compilation = False
         album_artist = None
         
-        if is_pure_album:
+        if folder_is_pure_album:
             unique_artists = set()
             for f in folder_files:
                 meta = extract_metadata(f)
@@ -551,7 +569,7 @@ def tag_directory(
                     do_lyrics=do_lyrics,
                     do_replaygain=do_replaygain,
                     do_metadata=do_metadata,
-                    is_pure_album=is_pure_album,
+                    is_pure_album=folder_is_pure_album, # Usamos la nueva variable
                     album_is_compilation=album_is_compilation,
                     album_artist=album_artist,
                     root_dir=directory,

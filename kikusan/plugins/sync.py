@@ -276,6 +276,7 @@ def _download_songs(
                 is_compilation=is_compilation,
                 original_album=original_album,
                 comment=song.reason, # <-- AÑADIDO
+                genre=getattr(song, 'genre', None), # <-- AÑADIDO
             )
 
             if audio_path:

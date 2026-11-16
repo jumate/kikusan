@@ -9,13 +9,14 @@ Se ha reescrito el plugin personalizado (`kikusan/plugins/lastfm_similar.py`) pa
   1. **Lógica Híbrida (Discover vs Library)**: Separa las recomendaciones cruzando los datos con Navidrome:
      * `discover_limit`: Descarga canciones de artistas recomendados que **NO** tienes en tu biblioteca.
      * `library_limit`: Busca canciones no descargadas de artistas que **SÍ** tienes, basándose en tus escuchas recientes.
-     * `new_releases_limit`: Busca lanzamientos recientes de artistas afines usando `user.getNewReleases`.
-  2. **Descubrimiento Aleatorio (Semillas)**: Coge tu Top 100 de artistas del último mes, los mezcla (shuffle), elige 15 al azar y los combina con tus `seed_artists` manuales.
+     * `new_releases_limit`: Busca lanzamientos recientes de artistas de tu Top 100 usando la API pública de **ListenBrainz** (sustituyendo al obsoleto método de Last.fm).
+  2. **Descubrimiento Aleatorio y Rotación (Jitter)**: Coge tu Top 100 de artistas del último mes, los mezcla (shuffle) y elige 15 al azar. A la puntuación final de los artistas similares se le añade un factor aleatorio para evitar que los mismos artistas salgan siempre en primer lugar.
   3. **Filtro de Historial (3 meses)**: Para evitar recomendar artistas que ya escuchas en bucle, filtra los candidatos contra tu historial de los **últimos 3 meses** (`period: "3month"`).
   4. **Filtros de Etiquetas (Tags)**: Permite incluir (`only_tags`) o excluir (`skip_tags`) artistas según sus etiquetas musicales en Last.fm.
-  5. **Deeper Cuts**: Si se activa, ignora el Top 10 de YouTube Music y extrae canciones entre las posiciones 10 y 25 para evitar los grandes éxitos. Si el artista no tiene suficientes, hace fallback al Top 10.
-  6. **Deduplicación**: Antes de descargar, consulta la API de Subsonic de Navidrome para comprobar si ya tienes la canción.
-  7. **Limpieza Automática (Purge)**: Si se activa `purge_rating: 1`, lee de la API nativa de Navidrome todas las canciones puntuadas con 1 estrella. Utiliza una **lógica difusa** para comparar nombres de archivo y artistas y borra esos archivos físicos del disco, lanzando un escaneo automático en Navidrome después.
+  5. **Género Inteligente**: Extrae el tag más popular del artista en Last.fm para guardarlo como género musical. Prioriza los tags incluidos en tu `only_tags` y descarta etiquetas no musicales (ej. "male vocalists", "chill").
+  6. **Deeper Cuts**: Si se activa, ignora el Top 10 de YouTube Music y extrae canciones entre las posiciones 10 y 40 para evitar los grandes éxitos. Si el artista no tiene suficientes, hace fallback al Top 10.
+  7. **Deduplicación Activa**: Antes de descargar, consulta la API de Subsonic de Navidrome para comprobar si ya tienes la canción. Si la canción más popular ya existe, el plugin probará con las siguientes (hasta 10) del mismo artista hasta encontrar una que no tengas.
+  8. **Limpieza Automática (Purge)**: Si se activa `purge_rating: 1`, lee de la API nativa de Navidrome todas las canciones puntuadas con 1 estrella. Utiliza una **lógica difusa** para comparar nombres de archivo y artistas y borra esos archivos físicos del disco, lanzando un escaneo automático en Navidrome después.
 
 * **Ejemplo de configuración en `cron.yaml`**:
 ```yaml
@@ -32,12 +33,12 @@ plugins:
       # Lógica Aurral
       discover_limit: 3          # Canciones de artistas nuevos
       library_limit: 2           # Canciones de artistas que ya tienes
-      new_releases_limit: 0      # Novedades (0 desactiva)
+      new_releases_limit: 1      # Novedades (0 desactiva)
       
       # Semillas y filtros
       seed_artists: "Fito & Fitipaldis, Marea"
       use_recent_listening: true # Activa el Top 100 + Filtro de 3 meses
-      deeper_cuts: false         # Top 10 vs Posiciones 10-25
+      deeper_cuts: false         # Top 10 vs Posiciones 10-40
       tracks_per_artist: 1
       
       # Etiquetas y exclusiones
@@ -47,13 +48,14 @@ plugins:
       purge_rating: 1
 ```
 
-## 2. Modo "Flow" (Pure Album) y Etiquetado de Motivos
-Se ha modificado la lógica de sincronización de plugins (`kikusan/plugins/sync.py`) y descarga (`kikusan/download.py`) para mejorar la experiencia de los Flows.
+## 2. Modo "Flow" (Pure Album) y Etiquetado
+Se ha modificado la lógica de sincronización de plugins (`kikusan/plugins/sync.py`), descarga (`kikusan/download.py`) y etiquetado (`kikusan/tagging.py`) para mejorar la experiencia de los Flows.
 
 * **Comportamiento**:
   * Descarga todas las canciones en una carpeta común (ej. `Flow Last.fm`) dentro de la raíz de la biblioteca.
   * Aplica los tags automáticamente: `Album`, `AlbumArtist` ("Varios Artistas"), `Compilation` ("1") y `Original Album`.
-  * **Nuevo Tag `COMMENT`**: Inyecta el motivo de la recomendación (ej. "Discover", "Library", "New Release") en la etiqueta `COMMENT` del archivo. Esto permite saber por qué Kikusan eligió esa canción directamente desde Navidrome o reproductores como Mp3tag.
+  * **Nuevos Tags `COMMENT` y `GENRE`**: Inyecta el motivo de la recomendación (ej. "[Discover] Similar to Marea") en `COMMENT` y el género musical obtenido de Last.fm en `GENRE`.
+  * **Protección del Álbum (`tagging.py`)**: Si el escáner general de Kikusan detecta un archivo con un `COMMENT` que empieza por `[` (indicando que es del Flow), **evita sobreescribir el nombre del álbum** con nombres genéricos como "Canciones".
   * Genera un archivo `.m3u` con el nombre del Flow.
   * **Limpieza de Residuos (Fix)**: Se ha reemplazado `os.rmdir` por `shutil.rmtree` para borrar forzosamente la carpeta temporal `recent_download`. Esto soluciona el problema de los archivos huérfanos `.webp` (carátulas), `.lrc` (letras) y `.nfo` que dejaba YouTube Music y que impedían borrar la carpeta.
 
@@ -78,3 +80,4 @@ Se ha extendido el soporte nativo de Deezer para aceptar tanto listas de reprodu
 * **Evitar fragmentación**: El etiquetado `Compilation=1` y `AlbumArtist=Varios Artistas` evita que Navidrome fragmente las listas en cientos de carpetas.
 * **Ignorar carpetas temporales**: Uso de `.ndignore` en `recent_download`.
 * **Protección de archivos**: Kikusan consulta a Navidrome para proteger canciones favoritas antes de borrarlas en los modos `sync`.
+

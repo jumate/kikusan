@@ -33,24 +33,26 @@ Es el motor de recomendación principal. Ha sido reescrito para emular la lógic
 ### Lógica Híbrida (Discover vs Library)
 *   **`discover_pool`:** Artistas recomendados por Last.fm que **NO** existen en la base de datos de Navidrome.
 *   **`library_pool`:** Artistas que el usuario escucha recientemente y que **SÍ** existen en Navidrome (se buscan canciones no descargadas aún).
-*   **`new_releases_pool`:** Novedades obtenidas vía `user.getNewReleases`.
+*   **`new_releases_pool`:** Novedades obtenidas consultando la API pública de **ListenBrainz** (lanzamientos de los últimos 30 días), ya que Last.fm eliminó su método `user.getNewReleases`. Se filtra por los artistas de tu Top 100.
 
 ### Motor de Descubrimiento Aleatorio (`_get_scored_candidates`)
 1.  **Semillas:** Coge el Top 100 de artistas del último mes de Last.fm. Los mezcla (shuffle) y selecciona 15 al azar. Le suma los `seed_artists` manuales.
-2.  **Similares:** Para cada semilla, busca 30 artistas similares. Los mezcla y coge los 10 mejores.
+2.  **Similares:** Para cada semilla, busca 30 artistas similares. Los mezcla y coge hasta 30 candidatos.
 3.  **Filtro Temporal:** Filtra contra los artistas escuchados en los **últimos 3 meses** (`period: "3month"` en `user.getTopArtists`). Evita recomendar artistas que ya se escuchan en bucle.
-4.  **Puntuación:** Los artistas recomendados por múltiples semillas obtienen mayor puntuación.
+4.  **Puntuación y Rotación (Jitter):** Los artistas recomendados por múltiples semillas obtienen mayor puntuación. Se añade un factor aleatorio (`random.uniform(0, 2.0)`) para romper empates y permitir que diferentes artistas roten semanalmente, evitando que los mismos salgan siempre primero.
 
 ### Funciones Extra y Fixes
 *   **Filtros de Etiquetas:** Implementa `only_tags` (inclusión) y `skip_tags` (exclusión) consultando `artist.getTopTags` en Last.fm.
-*   **Deeper Cuts:** Ignora el Top 10 de YouTube Music y extrae canciones entre las posiciones 10 y 25. Si falla, hace fallback al Top 10.
+*   **Género Inteligente:** Extrae el tag más relevante de Last.fm para usarlo como género. Prioriza los tags incluidos en tu `only_tags` y descarta una lista negra de etiquetas basura (ej. "male vocalists", "seen live", "chill").
+*   **Deduplicación con Búsqueda Secundaria:** Antes de descargar, consulta Navidrome. Si la canción más popular del artista ya existe, prueba con las siguientes (hasta 10 candidatas del mismo artista) para encontrar una que no tengas.
+*   **Deeper Cuts:** Ignora el Top 10 de YouTube Music y extrae canciones entre las posiciones 10 y 40. Si falla, hace fallback al Top 10.
 *   **Fallback de YTMusic:** Si `yt.get_artist()` falla (error `Unable to find 'header'` en la API), hace una búsqueda directa por canciones (`yt.search(..., filter="songs")`).
 
 ---
 
 ## 4. Sincronización y Limpieza (`sync.py`)
 
-*   **Inyección de Motivo (`reason`):** El plugin inyecta la propiedad `reason` en cada objeto `Song` (ej. "Discover", "Library", "New Release").
+*   **Inyección de Motivo (`reason`) y Género:** El plugin inyecta las propiedades `reason` y `genre` en cada objeto `Song` (ej. "Discover", "Library", "New Release").
 *   **Purga de 1 Estrella (`_purge_disliked_tracks`):**
     *   Conecta a la API nativa de Navidrome (`/auth/login` y `/api/song`).
     *   Busca canciones con `rating == 1`.
@@ -62,10 +64,11 @@ Es el motor de recomendación principal. Ha sido reescrito para emular la lógic
 
 ---
 
-## 5. Motor de Descarga y Etiquetado (`download.py`)
+## 5. Motor de Descarga y Etiquetado (`download.py` y `tagging.py`)
 
-*   **Soporte para `comment`:** Se añadió el parámetro `comment` a la firma de `download()` y a `_apply_pure_album_tags()`.
-*   **Escritura de metadatos:** Usa `mutagen` para escribir el motivo de la recomendación (`Discover`, `Library`) en la etiqueta `COMMENT` del archivo final (visible en Navidrome, Mp3tag, etc.).
+*   **Soporte para `comment` y `genre`:** Se añadieron estos parámetros a la firma de `download()` y a `_apply_pure_album_tags()`.
+*   **Escritura de metadatos:** Usa `mutagen` para escribir el motivo de la recomendación (`Discover`, `Library`) en la etiqueta `COMMENT` y el género en la etiqueta `GENRE` del archivo final.
+*   **Protección contra sobreescritura de Álbum (`tagging.py`):** Se añadió una comprobación. Si el archivo tiene un `COMMENT` que empieza por `[` (es decir, es un archivo del Flow), el escáner general ignorará la búsqueda en YouTube Music y **no sobreescribirá el nombre del álbum** (evitando que se cambie a "Canciones").
 *   **Gestión de Portadas:** Tras embeber la imagen en el archivo `.opus` usando `_embed_cover_art()`, se eliminan las miniaturas originales (`.webp`).
 
 ---
@@ -105,12 +108,12 @@ plugins:
       # Lógica Aurral
       discover_limit: 3          # Canciones de artistas nuevos
       library_limit: 2           # Canciones de artistas que ya tienes
-      new_releases_limit: 0      # Novedades (0 desactiva)
+      new_releases_limit: 1      # Novedades (0 desactiva)
       
       # Semillas y filtros
       seed_artists: "Dire Straits, Pink Floyd, Marea" 
       use_recent_listening: true # Activa el Top 100 + Filtro de 3 meses
-      deeper_cuts: false         # Top 10 vs Posiciones 10-25
+      deeper_cuts: false         # Top 10 vs Posiciones 10-40
       tracks_per_artist: 1
       
       # Etiquetas y exclusiones
@@ -126,7 +129,7 @@ plugins:
 
 **Para probar el plugin manualmente sin esperar al cron (Usando JSON):**
 ```bash
-sudo docker compose exec kikusan-cron uv run kikusan plugins run lastfm_similar --config '{"api_key": "xxx", "username": "xxxx", "flow_name": "Flow Last.Fm", "discover_limit": 3, "library_limit": 2, "new_releases_limit": 0, "tracks_per_artist": 1, "seed_artists": "Marea", "use_recent_listening": true, "deeper_cuts": false, "only_tags": "", "skip_tags": "", "exclude_artists": "", "purge_rating": 1}'
+sudo docker compose exec kikusan-cron uv run kikusan plugins run lastfm_similar --config '{"api_key": "xxx", "username": "xxxx", "flow_name": "Flow Last.Fm", "discover_limit": 3, "library_limit": 2, "new_releases_limit": 1, "tracks_per_artist": 1, "seed_artists": "Marea", "use_recent_listening": true, "deeper_cuts": false, "only_tags": "", "skip_tags": "", "exclude_artists": "", "purge_rating": 1}'
 ```
 
 **Para aplicar cambios en el código Python (Reconstruir contenedor):**
@@ -146,4 +149,9 @@ docker logs -f kikusan-cron
 1.  **Archivos `.webp` huérfanos:** La carpeta `recent_download` no se borraba porque `os.rmdir` falla si hay archivos dentro. **Solución:** `shutil.rmtree`.
 2.  **Error `unexpected keyword argument 'comment'`:** Kikusan ignoraba el parámetro `comment` al descargar. **Solución:** Actualizar `download.py` y `sync.py`.
 3.  **Error `Unable to find 'header'` en YouTube Music:** La API devolvía un JSON con una estructura inesperada para ciertos artistas (ej. Antonio Orozco). **Solución:** Bloque `try/except` con búsqueda directa por canciones (`filter="songs"`).
-4.  **Descargas duplicadas (Falsos positivos):** Algunos artistas se descargaban dos veces si el título variaba ligeramente. **Solución:** (Pendiente) Ajustar el `cache_key` en `base.py`.
+4.  **Error HTTP 400 en Last.fm (`user.getNewReleases`):** Last.fm eliminó el endpoint de novedades. **Solución:** Integración de ListenBrainz.
+5.  **Géneros incorrectos ("Male Vocalists"):** El código cogía un tag aleatorio del set de Last.fm. **Solución:** Ordenar por popularidad, filtrar tags basura y priorizar `only_tags`.
+6.  **Error `list object has no attribute 'intersection'`:** Ocurría al intentar cruzar tags con la nueva estructura. **Solución:** Convertir la lista de tuplas a un `set` de strings antes de la intersección.
+7.  **Álbum sobreescrito a "Canciones":** El escáner general sobreescribía el tag Album de los Flows. **Solución:** En `tagging.py`, si el COMMENT empieza por `[`, se ignora la búsqueda de álbum.
+8.  **Descargas duplicadas (Falsos positivos):** Algunos artistas se descargaban dos veces si el título variaba ligeramente. **Solución:** (Pendiente) Ajustar el `cache_key` en `base.py`.
+

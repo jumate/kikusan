@@ -208,20 +208,22 @@ class LastfmSimilarPlugin(Plugin):
             logger.error("Error en Last.fm API (%s): %s", method, e)
             return {}
 
-    def _get_artist_tags(self, api_key: str, artist_name: str) -> set:
+    def _get_artist_tags(self, api_key: str, artist_name: str) -> list:
         data = self._request_lastfm(api_key, "artist.getTopTags", {"artist": artist_name})
         tags = data.get("toptags", {}).get("tag", [])
-        return {t["name"].lower() for t in tags}
+        # Last.fm los devuelve ordenados por relevancia. Mantenemos ese orden.
+        return [(t["name"].lower(), int(t.get("count", 0))) for t in tags]
 
     def _passes_tag_filters(self, api_key: str, artist_name: str, only_tags: set, skip_tags: set) -> bool:
         """Comprueba si un artista pasa los filtros de etiquetas."""
         if not only_tags and not skip_tags:
             return True
-        artist_tags = self._get_artist_tags(api_key, artist_name)
+        artist_tags_list = self._get_artist_tags(api_key, artist_name)
+        artist_tags_set = {tag[0] for tag in artist_tags_list} # Convertimos a set para la intersección
         time.sleep(0.2) # Evitar rate limit
-        if only_tags and not artist_tags.intersection(only_tags):
+        if only_tags and not artist_tags_set.intersection(only_tags):
             return False
-        if skip_tags and artist_tags.intersection(skip_tags):
+        if skip_tags and artist_tags_set.intersection(skip_tags):
             return False
         return True
 
@@ -258,7 +260,8 @@ class LastfmSimilarPlugin(Plugin):
             similars = data.get("similarartists", {}).get("artist", [])
             random.shuffle(similars)
             
-            for sim in similars[:10]:
+            # Ampliamos a 30 para tener más variedad
+            for sim in similars[:30]:
                 name = sim["name"]
                 if name.lower() in known_artists: continue
                 
@@ -272,8 +275,15 @@ class LastfmSimilarPlugin(Plugin):
 
         final_list = []
         for name, data in candidates.items():
-            final_score = data["score"] + (len(data["seeds"]) * 0.5)
-            final_list.append({"artist": name, "score": round(final_score, 3)})
+            # Añadimos un factor aleatorio (jitter) para romper empates y rotar artistas
+            final_score = data["score"] + (len(data["seeds"]) * 0.5) + random.uniform(0, 2.0)
+            
+            # GUARDAMOS LAS SEMILLAS QUE LO RECOMENDARON
+            final_list.append({
+                "artist": name, 
+                "score": round(final_score, 3),
+                "seeds": list(data["seeds"])
+            })
 
         final_list.sort(key=lambda x: x["score"], reverse=True)
         return final_list
@@ -283,12 +293,46 @@ class LastfmSimilarPlugin(Plugin):
     # =========================================================================
 
     def _get_new_releases(self, api_key: str, username: str, limit: int) -> List[Dict]:
-        data = self._request_lastfm(api_key, "user.getNewReleases", {"user": username, "limit": limit * 2, "userec": 1})
-        albums = data.get("albums", {}).get("album", [])
-        return [{"artist": a["artist"]["name"], "album": a["name"]} for a in albums]
+        """Obtiene novedades reales usando ListenBrainz (ya que Last.fm lo eliminó)."""
+        # 1. Obtener tus artistas favoritos de Last.fm (últimos 6 meses)
+        data = self._request_lastfm(api_key, "user.getTopArtists", {"user": username, "period": "6month", "limit": 100})
+        top_artists = data.get("topartists", {}).get("artist", [])
+        favorite_artists = {a["name"].lower() for a in top_artists}
+
+        if not favorite_artists:
+            return []
+
+        # 2. Consultar ListenBrainz (lanzamientos de los últimos 30 días)
+        try:
+            logger.info("Consultando lanzamientos recientes en ListenBrainz...")
+            res = requests.get(
+                "https://api.listenbrainz.org/1/explore/fresh-releases/",
+                params={"days": 30, "past": "true", "future": "false"},
+                timeout=15
+            )
+            res.raise_for_status()
+            releases = res.json().get("payload", {}).get("releases", [])
+        except Exception as e:
+            logger.error("Error consultando ListenBrainz: %s", e)
+            return []
+
+        # 3. Filtrar: Solo queremos lanzamientos de artistas que ESCUCHAS
+        new_releases = []
+        for r in releases:
+            artist_name = r.get("artist_credit_name", "")
+            album_name = r.get("release_name", "")
+            
+            if artist_name.lower() in favorite_artists:
+                new_releases.append({"artist": artist_name, "reason": "New Release", "album": album_name})
+                
+            if len(new_releases) >= limit * 2:
+                break
+
+        logger.info("Encontradas %d novedades de tus artistas favoritos en ListenBrainz.", len(new_releases))
+        return new_releases
 
     
-    def _get_yt_tracks(self, yt: YTMusic, artist_name: str, limit: int, reason: str, deeper: bool = False, album_name: str = None) -> List[Song]:
+    def _get_yt_tracks(self, yt: YTMusic, artist_name: str, limit: int, reason: str, deeper: bool = False, album_name: str = None, genre: str = None) -> List[Song]:
         try:
             if album_name:
                 search_results = yt.search(f"{artist_name} {album_name}", filter="albums", limit=1)
@@ -296,8 +340,8 @@ class LastfmSimilarPlugin(Plugin):
                 album_data = yt.get_album(search_results[0]["browseId"])
                 tracks = album_data.get("tracks", [])
                 if tracks:
-                    t = random.choice(tracks)
-                    return [Song(artist=artist_name, title=t["title"], reason=reason)]
+                    # Devuelve hasta 'limit' canciones del álbum
+                    return [Song(artist=artist_name, title=t["title"], reason=reason, genre=genre) for t in tracks[:limit]]
                 return []
 
             search_results = yt.search(artist_name, filter="artists", limit=1)
@@ -320,17 +364,18 @@ class LastfmSimilarPlugin(Plugin):
             songs = []
             if not deeper:
                 for s in top_songs[:limit]:
-                    songs.append(Song(artist=artist_name, title=s["title"], reason=reason))
+                    songs.append(Song(artist=artist_name, title=s["title"], reason=reason, genre=genre))
             else:
-                start_idx, end_idx = 10, 25
+                # Ampliamos el rango de búsqueda para tener más opciones
+                start_idx, end_idx = 10, 40 
                 deep_cuts_pool = top_songs[start_idx:end_idx]
                 
                 if len(deep_cuts_pool) >= limit:
                     for s in deep_cuts_pool[:limit]:
-                        songs.append(Song(artist=artist_name, title=s["title"], reason=reason + " (Deep cut)"))
+                        songs.append(Song(artist=artist_name, title=s["title"], reason=reason + " (Deep cut)", genre=genre))
                 else:
                     for s in top_songs[:limit]:
-                        songs.append(Song(artist=artist_name, title=s["title"], reason=reason + " (Fallback)"))
+                        songs.append(Song(artist=artist_name, title=s["title"], reason=reason + " (Fallback)", genre=genre))
             return songs
         except Exception as e:
             logger.error("Error buscando en YT Music para '%s': %s", artist_name, e)
@@ -365,30 +410,31 @@ class LastfmSimilarPlugin(Plugin):
 
         nav_artists = self._get_all_navidrome_artists()
         
-        # =====================================================================
         # 1. DESCUBRIMIENTO DIRIGIDO (DISCOVER)
-        # Nace de las semillas manuales. Busca similares que NO tengas.
-        # =====================================================================
         discover_pool = []
         if discover_limit > 0:
             manual_seeds = [s.strip() for s in seed_artists_str.split(",") if s.strip()]
             if manual_seeds:
                 logger.info("Buscando similares a las semillas manuales (Discover)...")
-                # Forzamos use_recent=False para que SOLO use las semillas manuales
                 scored_candidates = self._get_scored_candidates(api_key, username, use_recent=False, manual_seeds=manual_seeds)
                 for artist in scored_candidates:
                     name = artist["artist"]
                     if name.lower() in nav_artists: continue
                     if name.lower() in exclude_set: continue
                     if not self._passes_tag_filters(api_key, name, only_tags_set, skip_tags_set): continue
-                    discover_pool.append(artist)
-                    # Guardamos un margen extra por si falla YT Music
-                    if len(discover_pool) >= discover_limit * 3: break
+                    
+                    seeds = artist.get("seeds", [])
+                    if seeds:
+                        seeds_str = ", ".join(seeds[:2]) + ("..." if len(seeds) > 2 else "")
+                        reason = f"Similar to {seeds_str}"
+                    else:
+                        reason = "Similar to your seeds"
+                        
+                    discover_pool.append({"artist": name, "reason": reason})
+                    # Ampliamos a 30 para tener más de dónde elegir
+                    if len(discover_pool) >= 30: break
 
-        # =====================================================================
         # 2. ESCUCHAS RECIENTES (LIBRARY)
-        # Nace de tu historial. Filtra SOLO los que SÍ tienes en Navidrome.
-        # =====================================================================
         library_pool = []
         if library_limit > 0 and use_recent:
             logger.info("Buscando en tus escuchas recientes artistas que YA TENGAS en Navidrome (Library)...")
@@ -396,42 +442,93 @@ class LastfmSimilarPlugin(Plugin):
             recent_artists = data.get("topartists", {}).get("artist", [])
             for a in recent_artists:
                 name = a["name"]
-                # AQUÍ ESTÁ LA MAGIA: Solo entran si ESTÁN en Navidrome
                 if name.lower() not in nav_artists: continue
                 if name.lower() in exclude_set: continue
                 if not self._passes_tag_filters(api_key, name, only_tags_set, skip_tags_set): continue
-                library_pool.append({"artist": name})
-                if len(library_pool) >= library_limit * 3: break
+                
+                library_pool.append({"artist": name, "reason": "From your recent listening"})
+                # Ampliamos a 30
+                if len(library_pool) >= 30: break
 
-        # =====================================================================
-        # 3. NOVEDADES
-        # =====================================================================
+        # 3. NOVEDADES (ListenBrainz)
         new_releases_pool = []
         if new_releases_limit > 0:
-            new_releases_pool = [r for r in self._get_new_releases(api_key, username, limit=20) if r["artist"].lower() not in exclude_set]
+            logger.info("Filtrando novedades por etiquetas...")
+            raw_releases = self._get_new_releases(api_key, username, limit=30)
+            
+            if raw_releases:
+                logger.info("Novedades encontradas en ListenBrainz: %s", [r["artist"] for r in raw_releases])
+
+            for release in raw_releases:
+                name = release["artist"]
+                if name.lower() in exclude_set: continue
+                
+                # Comprobamos los tags. Si no pasa el filtro, mostramos un aviso en el log.
+                if not self._passes_tag_filters(api_key, name, only_tags_set, skip_tags_set): 
+                    artist_tags = self._get_artist_tags(api_key, name)
+                    logger.info("  [DESCARTADA NOVEDAD] %s tiene nueva música, pero sus tags son %s (no encaja con tus only_tags)", name, list(artist_tags))
+                    continue
+                    
+                new_releases_pool.append(release)
 
         yt = YTMusic()
         songs = []
         
-        def process_pool(pool: List[Dict], limit: int, reason_prefix: str, is_release: bool = False):
+        def process_pool(pool: List[Dict], target_limit: int, reason_prefix: str, is_release: bool = False):
             random.shuffle(pool)
-            count = 0
+            count_found = 0
             for item in pool:
-                if count >= limit: break
+                if count_found >= target_limit: break
                 artist_name = item["artist"]
+                reason_text = item.get("reason", "")
                 album_name = item.get("album") if is_release else None
                 
-                # Buscar sus canciones en YouTube Music
-                logger.info("Buscando [%s] %s en YouTube Music...", reason_prefix, artist_name)
-                
-                tracks = self._get_yt_tracks(yt, artist_name, tracks_per_artist, reason_prefix, deeper_cuts, album_name)
-                if tracks:
-                    songs.extend(tracks)
-                    count += 1
-                    
-                time.sleep(1) # Evitar bloqueos
+                full_reason = f"[{reason_prefix}] {reason_text}"
+                logger.info("Buscando %s en YouTube Music...", full_reason)
 
-        # 4. Ejecutar descargas según las colas construidas
+                # NUEVO: Extraer el género inteligentemente
+                artist_tags_list = self._get_artist_tags(api_key, artist_name)
+                
+                # Lista de tags basura que no queremos como género
+                junk_tags = {
+                    "seen live", "favorites", "favourite", "under 2000 listeners",
+                    "male vocalists", "female vocalists", "chill", "feel good", "freedom",
+                    "love", "awesome", "spotify", "usa", "uk", "american", "british",
+                    "this is just so cool", "nema", "lounge", "spanish", "spain", "latin"
+                }
+                
+                genre = "Unknown"
+                
+                # 1. Priorizar los tags que el usuario tiene en only_tags
+                if only_tags_set:
+                    for tag, count in artist_tags_list:
+                        if tag in only_tags_set:
+                            genre = tag
+                            break
+                            
+                # 2. Si no hay match, coger el primer tag que no sea basura
+                if genre == "Unknown":
+                    for tag, count in artist_tags_list:
+                        if tag not in junk_tags:
+                            genre = tag
+                            break
+                
+                tracks = self._get_yt_tracks(yt, artist_name, 10, full_reason, deeper_cuts, album_name, genre=genre)
+                
+                if tracks:
+                    for track in tracks:
+                        if self._is_already_in_navidrome(track.artist, track.title):
+                            continue
+                        
+                        songs.append(track)
+                        count_found += 1
+                        logger.info("  -> Añadida: %s (Género: %s)", track.title, genre)
+                        
+                        if count_found >= target_limit:
+                            break
+                    
+                time.sleep(1)
+
         if discover_limit > 0: process_pool(discover_pool, discover_limit, "Discover")
         if library_limit > 0: process_pool(library_pool, library_limit, "Library")
         if new_releases_limit > 0: process_pool(new_releases_pool, new_releases_limit, "New Release", is_release=True)
